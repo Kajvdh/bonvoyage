@@ -56,10 +56,32 @@ ${spec}
 </html>
 `;
 
+const notFound = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Not found | Bonvoyage</title>
+<style>${css}</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top"><a class="mark" href="/">BON<b>VOYAGE</b></a></header>
+<main style="padding:70px 0 120px">
+  <p class="eyebrow">404</p>
+  <h1>This ticket got lost.</h1>
+  <p class="lead">There is nothing at this address. The relay lives under <code>/v1</code>; everything else is on the <a href="/">front page</a>.</p>
+</main>
+</div>
+</body>
+</html>
+`;
+
 mkdirSync(out("spec/"), { recursive: true });
 mkdirSync(out("vectors/"), { recursive: true });
 writeFileSync(out("index.html"), index);
 writeFileSync(out("spec/index.html"), specPage);
+writeFileSync(out("404.html"), notFound);
 cpSync(new URL("../../vectors/v1.json", here), out("vectors/v1.json"));
 cpSync(new URL("../../SPEC.md", here), out("SPEC.md"));
 console.log("built public/: index.html, spec/index.html, vectors/v1.json, SPEC.md");

@@ -125,12 +125,24 @@ The relay protects itself where it can: a sender's share of an inbox is
 capped, the relay's total storage is capped, new inboxes are limited per hour,
 unused inboxes expire, and bad requests are refused before their body is read.
 
-On Cloudflare the Worker also limits each IP address to 180 relay requests a
-minute (the `[[ratelimits]]` block in `wrangler.toml`). That keeps one client
-from loading the database, but every request still counts towards your plan's
-daily allowance, because the limit runs inside the Worker. To stop a flood
-before it reaches the Worker, add a rate limiting rule for the relay's host
-name under Security in the Cloudflare dashboard (the free plan includes one).
+On Cloudflare, two more things are set up in `wrangler.toml`:
+
+- Only paths under `/v1` run the relay code. Everything else (the site, and
+  any path that does not exist) is answered from static files, which do not
+  count towards the plan's daily request allowance.
+- The Worker limits each IP address to 180 relay requests a minute. That keeps
+  one client from loading the database, but those requests still count,
+  because the limit runs inside the Worker.
+
+To stop a flood before it reaches the Worker, add a rate limiting rule in the
+Cloudflare dashboard (Security; the free plan includes one) for URI paths
+starting with `/v1`, for example 20 requests per 10 seconds per IP address.
+
+Be realistic about what this buys on a free plan: it stops accidents and
+casual abuse. Someone determined, using many addresses or staying just under
+the limit, can still use up a day's allowance. The damage is bounded: the
+relay answers with errors until the allowance resets at 00:00 UTC, and no
+ticket is lost or exposed.
 
 On your own server, use your reverse proxy's rate limiting. Per-address
 counters that live for minutes are fine; request logs are not (see section 1.1

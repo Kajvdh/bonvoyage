@@ -20,6 +20,11 @@ migrations_dir = "migrations"
 # Files here are served directly; everything else goes to the relay code.
 [assets]
 directory = "./public"
+# Only /v1 reaches the relay code. Every other path is answered from the static
+# files (or their 404 page) without running the Worker, so it cannot be used to
+# use up the plan's request allowance.
+run_worker_first = ["/v1", "/v1/*"]
+not_found_handling = "404-page"
 
 # At most this many relay requests per IP address per minute, per Cloudflare location.
 # A printer polling every 30 seconds makes 2. namespace_id is any integer unique in your account.
