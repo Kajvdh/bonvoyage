@@ -30,7 +30,7 @@ const MAX_BODY = 65536;
 const PUBLIC = new URL("../public/", import.meta.url);
 const TYPES = { html: "text/html; charset=utf-8", json: "application/json", md: "text/markdown; charset=utf-8" };
 const pages = new Map();
-for (const [route, file] of [["/", "index.html"], ["/spec/", "spec/index.html"], ["/vectors/v1.json", "vectors/v1.json"], ["/SPEC.md", "SPEC.md"]]) {
+for (const [route, file] of [["/", "index.html"], ["/spec/", "spec/index.html"], ["/card/", "card/index.html"], ["/vectors/v1.json", "vectors/v1.json"], ["/SPEC.md", "SPEC.md"]]) {
   if (existsSync(new URL(file, PUBLIC))) pages.set(route, { type: TYPES[file.split(".").pop()], body: readFileSync(new URL(file, PUBLIC)) });
 }
 

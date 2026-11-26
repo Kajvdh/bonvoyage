@@ -269,9 +269,18 @@ def _percent_decode(text: str) -> str:
         raise Discard("name is not UTF-8") from e
 
 
+def unwrap_card(text: str) -> str:
+    """A card as people paste it: the bare URI, or the web link a phone shows (https://host/card/#bonvoyage://...)."""
+    text = text.strip()
+    if text.startswith("https://") and "#" in text:
+        text = urllib.parse.unquote(text.split("#", 1)[1])
+    return text
+
+
 def parse_card(uri: str, *, now: int | None = None) -> dict:
     """Check a card someone gave you. Raises Discard for anything that is not exactly a valid card."""
     now = int(time.time()) if now is None else now
+    uri = unwrap_card(uri) if isinstance(uri, str) else uri
     match = re.fullmatch(r"bonvoyage://([^/?#@]+)/([^/?#]+)\?([^#]*)", uri if isinstance(uri, str) else "")
     if not match:
         raise Discard("not a Bonvoyage contact card")

@@ -223,6 +223,21 @@ Someone who is given a card MUST, before using it:
 
 Parameters not in the table are ignored.
 
+**Cards for phones.** A phone camera that scans a QR code holding a
+`bonvoyage://` URI does not know what to do with it. A client MAY therefore
+put a web link in the QR code instead, of the form
+
+```
+https://<host>/card/#<card URI>
+```
+
+where the page at that address shows the card with a way to copy it. The part
+of a link after `#` is not sent to the server, so a relay that serves such a
+page still does not see the card; but whoever serves the page is trusted not
+to send it anywhere from the browser. A client that takes in a card SHOULD
+accept this form too, by using only what follows the `#`. This wrapping is a
+convenience for people, not part of the card.
+
 A card is checked once, when it is taken in. The sender then keeps what it
 needs from it (address, encryption key, token and pairing secret) and uses
 that for every message; `e` is not looked at again. Because the issuer stops

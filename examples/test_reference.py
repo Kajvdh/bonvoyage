@@ -543,3 +543,15 @@ def test_plain_http_needs_development_mode(monkeypatch):
         bv._http("GET", "localhost:8787", "/v1", None, {})
     with pytest.raises(ValueError):
         bv.new_identity("localhost:8787")
+
+
+def test_a_card_wrapped_in_a_web_link_is_accepted():
+    card = V["cards"]["valid"]
+    plain = bv.parse_card(card["uri"], now=V["cards"]["now"])
+    for wrapped in ("https://bonvoyage.example/card/#" + card["uri"],
+                    "  https://bonvoyage.example/card/#" + card["uri"].replace("://", "%3A%2F%2F") + "\n"):
+        assert bv.parse_card(wrapped, now=V["cards"]["now"]) == plain
+    with pytest.raises(bv.Discard):
+        bv.parse_card("https://bonvoyage.example/card/#nothing-here", now=V["cards"]["now"])
+    with pytest.raises(bv.Discard):
+        bv.parse_card("https://bonvoyage.example/card/", now=V["cards"]["now"])
