@@ -194,7 +194,7 @@ blockquote.prompt { margin:14px 0 0; padding:16px 18px; background:color-mix(in 
   <ol class="steps">
     <li><h3>Pair</h3><p>Hand someone a contact card, ideally as a QR code printed on a ticket. Whoever uses it first becomes that contact, so it is valid for a week and you can take it back.</p></li>
     <li><h3>Seal and drop</h3><p>The sender builds a ticket from simple blocks, signs it, seals it for you and drops it in your inbox on the relay.</p></li>
-    <li><h3>Collect and print</h3><p>Your printer picks it up on its next round, verifies who it is from, applies your limits and quiet hours, and prints.</p></li>
+    <li><h3>Collect and print</h3><p>Your printer picks it up on its next round, every five minutes or so, verifies who it is from, applies your limits and quiet hours, and prints.</p></li>
   </ol>
 </section>
 
@@ -276,7 +276,7 @@ python examples/bonvoyage.py receive jan.json
       </ul>
     </div>
   </div>
-  <p class="explain" style="max-width:46em"><b>One thing follows from that last line.</b> If you and a contact use the same relay, it sees the same IP address collect from one inbox and drop into another, and could work out that you two write to each other. It still cannot read anything. If that matters to you, use a different relay from your contacts, or run your own.</p>
+  <p class="explain" style="max-width:46em"><b>Two things follow from that last line.</b> You connect to the relay your contact chose, so someone who runs their own relay sees the IP address of everyone who sends to them. And: If you and a contact use the same relay, it sees the same IP address collect from one inbox and drop into another, and could work out that you two write to each other. It still cannot read anything. If that matters to you, use a different relay from your contacts, or run your own.</p>
 </section>
 
 <section id="build">
@@ -332,11 +332,12 @@ python examples/bonvoyage.py receive jan.json
   <p class="eyebrow">This relay</p>
   <h2><span class="host" data-host>This relay</span> is free to use.</h2>
   <p class="lead">Point your client at it and your address becomes <code>&lt;your key&gt;@<span data-host>this relay</span></code>. No account, no sign-up: your printer's key is your identity.</p>
+  <p style="max-width:44em;color:var(--soft)">A new inbox starts small, with room for 5 waiting tickets, and gets its full quota once its printer has collected on three different days. That keeps the relay usable for everyone while staying open to anyone.</p>
   <dl class="limits">
     <div><dt>Per ticket</dt><dd data-limit="max_message_bytes">60 KB</dd></div>
     <div><dt>Waiting per contact</dt><dd data-limit="max_messages_per_token">10</dd></div>
     <div><dt>Kept for</dt><dd data-limit="retention_seconds">7 days</dd></div>
-    <div><dt>New inboxes</dt><dd data-limit="registration">open</dd></div>
+    <div><dt>Collect every</dt><dd data-limit="poll_seconds">5 min</dd></div>
   </dl>
 
   <div class="two" style="margin-top:44px">
@@ -375,7 +376,7 @@ fetch("/v1").then(r => r.ok ? r.json() : null).then(info => {
     max_message_bytes: v => Math.round(v / 1024) + " KB",
     max_messages_per_token: v => String(v),
     retention_seconds: v => Math.round(v / 86400) + " days",
-    registration: v => v,
+    poll_seconds: v => Math.round(v / 60) + " min",
   };
   for (const el of document.querySelectorAll("[data-limit]")) {
     const key = el.dataset.limit;

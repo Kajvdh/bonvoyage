@@ -8,6 +8,7 @@ compatibility_date = "2025-09-01"
 enabled = false
 
 [vars]
+# RELAY_HOST = "relay.example" # optional here: Cloudflare only routes your own host names to the Worker
 REGISTRATION = "open" # "invite" asks new inboxes for INVITE_CODE (set it with `wrangler secret put INVITE_CODE`); "closed" refuses them
 
 [[d1_databases]]

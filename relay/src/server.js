@@ -6,7 +6,11 @@ import { createRelay } from "./core.js";
 import { NodeStore } from "./store-node.js";
 
 const port = Number(process.env.PORT || 8787);
+// RELAY_HOST: the host name clients use for this relay. Set it: owner requests signed for any
+// other host are then refused, whatever the proxy in front passes on as Host.
+// TRUST_PROXY=1: take the client address from X-Forwarded-For (only behind your own proxy).
 const relay = createRelay(new NodeStore(process.env.BONVOYAGE_DB || "bonvoyage.db"), {
+  host: (process.env.RELAY_HOST || "").toLowerCase(),
   registration: ["closed", "invite"].includes(process.env.REGISTRATION) ? process.env.REGISTRATION : "open",
   inviteCode: process.env.INVITE_CODE || "",
 });
@@ -39,6 +43,10 @@ async function serve(req, res) {
   const host = req.headers.host || "";
   const port = Number(host.split(":")[1] || 1);
   if (!/^[A-Za-z0-9.-]{1,253}(:\d{1,5})?$/.test(host) || port < 1 || port > 65535) return reply(res, 400, "bad host");
+  // Nothing is read from a request that does not even carry credentials of the right shape.
+  const segments = path.split("/").length;
+  if (req.method === "POST" && segments === 5 && !/^Bearer [A-Za-z0-9_-]{43}$/.test(req.headers.authorization || "")) return reply(res, 401, "not authorised");
+  if (req.method === "PUT" && segments === 4 && !req.headers["bonvoyage-auth"]) return reply(res, 401, "not authorised");
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
@@ -51,7 +59,8 @@ async function serve(req, res) {
     headers: req.headers,
     body: req.method === "GET" ? undefined : Buffer.concat(chunks),
   });
-  const response = await relay.fetch(request);
+  const forwarded = process.env.TRUST_PROXY === "1" ? String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() : "";
+  const response = await relay.fetch(request, forwarded || req.socket.remoteAddress || "");
   res.writeHead(response.status, Object.fromEntries(response.headers));
   res.end(Buffer.from(await response.arrayBuffer()));
 }

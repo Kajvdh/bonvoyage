@@ -4,8 +4,8 @@ A small open protocol for sending tickets from one ticket printer to another.
 
 - **Nothing at home is exposed.** Printers only connect outward, to a relay.
 - **The relay cannot read tickets.** Every ticket is signed by the sender and
-  sealed for the recipient before it leaves; the relay stores unreadable bytes
-  and never learns who sent them.
+  sealed for the recipient before it leaves; the relay stores bytes it cannot
+  open. The spec says plainly what a relay can still observe (section 1.1).
 - **The recipient decides.** You pair with people explicitly, and your own
   limits and quiet hours always apply.
 - **Not tied to any software.** Anyone with a ticket printer can implement it
@@ -99,20 +99,25 @@ To serve it on your own domain, uncomment the `[[routes]]` block in
 Needs Node 22.13 or newer, nothing else.
 
     cd relay
-    BONVOYAGE_DB=/var/lib/bonvoyage/relay.db PORT=8787 node src/server.js
+    RELAY_HOST=relay.example BONVOYAGE_DB=/var/lib/bonvoyage/relay.db PORT=8787 node src/server.js
 
 or with Docker:
 
     docker build -t bonvoyage-relay relay
-    docker run -d -p 127.0.0.1:8787:8787 -v bonvoyage:/data bonvoyage-relay
+    docker run -d --restart unless-stopped -e RELAY_HOST=relay.example \
+        -p 127.0.0.1:8787:8787 -v bonvoyage:/data bonvoyage-relay
 
-Put it behind a reverse proxy that provides HTTPS. Configure that proxy **not
-to log client addresses**; the relay itself logs nothing about requests.
+Put it behind a reverse proxy that provides HTTPS, and set `RELAY_HOST` to the
+name people use for it (see Settings). The proxy must pass the original `Host`
+header on. Configure it **not to log client addresses**; the relay itself logs
+nothing about requests. With Docker, add `--restart unless-stopped`.
 
 ### Settings
 
 | | |
 |---|---|
+| `RELAY_HOST` | The host name clients use for this relay, for example `relay.example`. **Set this when you host it yourself**: owner requests signed for any other host are then refused, which is what stops a request made to another relay from being replayed to yours. On Cloudflare the routing already guarantees it. |
+| `TRUST_PROXY` | Self-hosted only: `1` takes the client address from `X-Forwarded-For`. Use it only behind your own reverse proxy. The address is used for per-address limits and is never logged. |
 | `REGISTRATION` | `open` (default) lets anyone create an inbox. `invite` asks for a code when an inbox is created. `closed` refuses new inboxes. Existing inboxes keep working in every mode. |
 | `INVITE_CODE` | The code for `invite` mode. On Cloudflare set it with `npx wrangler secret put INVITE_CODE`. |
 
@@ -121,9 +126,19 @@ Limits are in `relay/src/core.js`; the ones clients need are reported at
 
 ### Running a public relay
 
-The relay protects itself where it can: a sender's share of an inbox is
-capped, the relay's total storage is capped, new inboxes are limited per hour,
-unused inboxes expire, and bad requests are refused before their body is read.
+The relay protects itself where it can:
+
+- a sender's share of an inbox is capped, and so is the relay's total storage;
+- a new inbox starts with a small quota and becomes established by collecting
+  on three different days; all new inboxes together can use only part of the
+  relay, so established users keep working when newcomers flood in;
+- new inboxes are limited per address and per hour, and ones that never
+  become established are removed after a week;
+- bad requests are refused before their body is read.
+
+An open relay can still be worn down by someone determined with many
+addresses. That is the price of letting anyone in without an account; the
+damage is delay, never disclosure, and anyone can run their own.
 
 On Cloudflare, two more things are set up in `wrangler.toml`:
 
@@ -159,10 +174,12 @@ The conformance tests run against any relay:
 
 ## Security
 
-The spec was reviewed adversarially before the first clients were written, and
-the findings are folded into the current draft: pairing no longer trusts the
-relay, replay and paper use are bounded, cards are signed and strictly parsed,
-and malformed input is discarded rather than fatal. Section 9 of the spec
+The spec, relay and reference client went through two independent adversarial
+reviews before the first clients were written, and the findings are folded
+into the current draft: pairing does not trust the relay and needs a real
+ticket, replay is bounded, cards are signed and strictly parsed, a card cannot
+point a client at a private address, and malformed input is discarded rather
+than fatal. Section 9 of the spec
 lists what remains true by design (no forward secrecy, signatures are
 transferable proof, a card proves possession and nothing more).
 

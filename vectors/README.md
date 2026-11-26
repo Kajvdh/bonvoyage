@@ -16,20 +16,30 @@ for everyone.
 | In `v1.json` | Your code must | Spec |
 |---|---|---|
 | `base64url` | decode `canonical`, and refuse every string in `must_reject` | 1.2 |
+| `hosts` | accept every host under `valid` and refuse every one under `must_reject` (with development mode off) | 1.2 |
 | `sender`, `recipient`, `stranger` | derive `signing_public`, `encryption_public`, `inbox_id` and `address` from the two secret keys | 2, 3.1 |
 | `drop_token` | compute `token_id` from `token` | 4 |
-| `cards.valid` | build the same `uri` as the recipient, and parse it back into the listed parts; `cards.signing_input` shows the exact bytes that are signed | 3.2 |
-| `cards.must_reject` | refuse every one of these cards | 3.2 |
+| `cards.valid` | build the same `uri` as the recipient (parameters in the recommended order), and parse it back into the listed parts; `cards.signing_input` shows the exact bytes that are signed | 3.2 |
+| `cards.also_valid` | accept these too, at time `cards.now`: no expiry or name, a name full of special characters, another parameter order with an unknown parameter | 3.2 |
+| `cards.must_reject` | refuse every one of these cards, at time `cards.now` | 3.2 |
 | `message.sealed` | open it as the recipient and get exactly `message.message_json` | 5.4 |
-| `message.sig`, `message.signed_message_json` | produce the same signature and signed wrapper as the sender (Ed25519 signatures are deterministic) | 5.2 |
+| `message.sig`, `message.signed_message_json` | produce the same signature and signed wrapper as the sender | 5.2 |
 | `message.padded_length`, `message.sealed_length` | get the same lengths when sealing | 5.3 |
 | `message.expect_plain_text` | optional: render the ticket as plain text, 48 characters wide | 7 |
-| `must_reject` | refuse every one of these sealed messages in steps 1 to 6 of receiving | 5.4 |
-| `contact_checks` | starting with one unpaired contact made from `cards.valid`, handle the steps in order and get `print` or `discard` for each | 3.3, 5.4 |
+| `must_accept` | accept every one of these sealed messages in steps 1 to 6 of receiving: the exact boundaries of the time checks, a long message, an unknown member, another relay in `to` | 5.4 |
+| `must_reject` | refuse every one of these sealed messages in steps 1 to 6 | 5.4 |
+| `may_reject` | not crash on these; accepting or refusing them are both allowed | 1.2 |
+| `contact_checks` | starting with one unpaired contact, handle the steps in order: get `print` or `discard` for each, have exactly `pinned_after` pinned afterwards, and leave no trace of a discarded message | 3.3, 5.4 |
+| `contact_checks.expired_card` | refuse to pair once the card has expired | 3.3 |
 | `tickets.valid` | accept these tickets | 7 |
-| `tickets.must_discard` | discard every one of these tickets | 7.2, 7.4 |
+| `tickets.must_discard` | discard every one of these tickets | 7.1, 7.2, 7.4 |
 | `tickets.text_cleaning` | turn each `input` into its `output` | 7.3 |
-| `owner_request` | produce the same `header` for that method, host, path, time and body | 6.2 |
+| `owner_requests` | produce the same `header` for each method, host, path, time and body | 6.2 |
+| `relay_response` | from a collect response with those ids, process and delete exactly `ids_to_process` | 6.5 |
+
+Signatures are compared byte for byte, which assumes the deterministic
+Ed25519 of RFC 8032 that libsodium implements. A signer that adds randomness
+produces valid signatures that differ from the ones here.
 
 Sealing uses a fresh random key every time, so you cannot reproduce a sealed
 message byte for byte. Instead: open the given ones, and check that what you
