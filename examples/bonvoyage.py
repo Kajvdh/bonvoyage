@@ -3,15 +3,18 @@
 
 It is meant to be read next to the spec, and to try the protocol by hand:
 
-    python bonvoyage.py init  me.json  --relay bonvoyage.kaj.dev --name Kaj
-    python bonvoyage.py card  me.json  Jan          # give the printed URI to Jan
-    python bonvoyage.py send  me.json  '<card URI from someone>' 'Hallo!'
-    python bonvoyage.py receive me.json
+    python bonvoyage.py init    me.json --relay bonvoyage.kaj.dev --name Kaj
+    python bonvoyage.py card    me.json Jan        # a card for Jan: give him the line it prints
+    python bonvoyage.py add     me.json Jan '<card URI that Jan gave you>'
+    python bonvoyage.py send    me.json Jan 'Hallo!'
+    python bonvoyage.py receive me.json            # shows tickets, and asks about new contacts
+    python bonvoyage.py confirm me.json Jan        # after comparing fingerprints with Jan
+    python bonvoyage.py fingerprint me.json
 
 Needs PyNaCl (libsodium). It shows received tickets as text; a real client
 hands them to its printer and applies the rest of the policy in SPEC section 8
-(quiet hours, a daily limit per contact, asking the owner about a new contact),
-and backs off when a relay answers 429, 500 or 503 (SPEC 6).
+(quiet hours, a daily limit per contact), and backs off when a relay answers
+429, 500 or 503 (SPEC 6).
 """
 import argparse
 import base64
@@ -28,6 +31,7 @@ import ssl
 import struct
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 import urllib.parse
@@ -57,12 +61,13 @@ TIME_MAX = 2 ** 40
 
 B64 = re.compile(r"[A-Za-z0-9_-]*")
 LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
-HOST = re.compile(rf"(?=[^:]{{1,253}}(?::|$))(?:{LABEL}\.)+[a-z]{{1,63}}(?::(?!443$)([1-9]\d{{0,4}}))?")
-DEV_HOST = re.compile(r"localhost(?::([1-9]\d{0,4}))?")
+HOST = re.compile(rf"(?=[^:]{{1,253}}(?::|$))(?:{LABEL}\.)+[a-z]{{1,63}}(?::(?!443$)([1-9][0-9]{{0,4}}))?")
+DEV_HOST = re.compile(r"localhost(?::([1-9][0-9]{0,4}))?")
 INBOX = re.compile(r"[A-Za-z0-9_-]{43}")
 SHORT = re.compile(r"[A-Za-z0-9_-]{22}")
 RELAY_MESSAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
-DECIMAL = re.compile(r"[1-9]\d{0,12}")
+DECIMAL = re.compile(r"[1-9][0-9]{0,12}")
+HELD_MAX = 5              # tickets held for a contact that is not confirmed yet (SPEC 3.3)
 UNRESERVED = "-._~"
 
 
@@ -103,6 +108,27 @@ def _check_depth(value, level: int = 1) -> None:
             _check_depth(child, level + 1)
 
 
+def _scan_depth(data: bytes) -> None:
+    """Refuse deep nesting before any parser sees the bytes (SPEC 1.2): count brackets outside strings."""
+    depth, in_string, escaped = 0, False, False
+    for byte in data:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:      # backslash
+                escaped = True
+            elif byte == 0x22:      # closing quote
+                in_string = False
+        elif byte == 0x22:
+            in_string = True
+        elif byte in (0x5B, 0x7B):  # [ {
+            depth += 1
+            if depth > MAX_DEPTH:
+                raise Discard("JSON nested too deeply")
+        elif byte in (0x5D, 0x7D):  # ] }
+            depth -= 1
+
+
 def parse_json(data: bytes):
     """Strict JSON: valid UTF-8, RFC 8259 only, no unpaired surrogates, bounded nesting.
     This parser also rejects duplicate member names, which the spec allows a receiver to do."""
@@ -115,6 +141,9 @@ def parse_json(data: bytes):
     def not_json(name):
         raise Discard(f"{name} is not JSON")
 
+    if data.startswith(b"\xef\xbb\xbf"):
+        raise Discard("a byte order mark is not JSON")
+    _scan_depth(data)
     try:
         value = json.loads(data.decode("utf-8"), object_pairs_hook=no_duplicates, parse_constant=not_json)
         json.dumps(value, ensure_ascii=False).encode("utf-8")  # fails on an unpaired surrogate
@@ -169,7 +198,7 @@ def new_identity(relay: str, name: str = "") -> dict:
     if not is_host(relay):
         raise ValueError("relay must be a host name like relay.example, optionally with a port")
     return {"relay": relay, "name": name, "sign": b64(bytes(SigningKey.generate())),
-            "enc": b64(bytes(PrivateKey.generate())), "contacts": {}, "seen": {}, "queue": []}
+            "enc": b64(bytes(PrivateKey.generate())), "contacts": {}, "cards": {}, "seen": {}, "queue": []}
 
 
 def inbox_id(identity: dict) -> str:
@@ -182,6 +211,32 @@ def address(identity: dict) -> str:
 
 def token_id(token: bytes) -> str:
     return hashlib.sha256(token).hexdigest()
+
+
+def fingerprint(signing_key: bytes) -> str:
+    """SPEC 3.4: twelve digits that two people can compare, for example '4821 0937 5512'."""
+    number = int.from_bytes(hashlib.sha256(b"bonvoyage-v1-fingerprint\n" + signing_key).digest()[:5], "big") % 10 ** 12
+    digits = f"{number:012d}"
+    return f"{digits[:4]} {digits[4:8]} {digits[8:]}"
+
+
+def leading_zero_bits(digest: bytes) -> int:
+    bits = 0
+    for byte in digest:
+        if byte == 0:
+            bits += 8
+            continue
+        return bits + 8 - byte.bit_length()
+    return bits
+
+
+def proof_of_work(inbox: str, bits: int) -> str:
+    """SPEC 6.3: the smallest nonce whose hash starts with `bits` zero bits. Takes about 2^bits tries."""
+    prefix = f"bonvoyage-v1-pow\n{inbox}\n".encode()
+    nonce = 0
+    while leading_zero_bits(hashlib.sha256(prefix + str(nonce).encode()).digest()) < bits:
+        nonce += 1
+    return str(nonce)
 
 
 def _card_signing_input(host, inbox, k, t, p, e, name) -> bytes:
@@ -253,13 +308,30 @@ def parse_card(uri: str, *, now: int | None = None) -> dict:
 
 
 def issue_card(identity: dict, contact_name: str, *, now: int | None = None, lifetime: int = CARD_LIFETIME) -> str:
-    """Create a contact with its own token and pairing secret, and return the card to hand over.
+    """Create an open contact with its own token and pairing secret, and return the card to hand over.
     The caller registers the new token with the relay (see `register`) and saves the identity."""
     now = int(time.time()) if now is None else now
     token, pair = os.urandom(32), os.urandom(16)
     identity["contacts"][token_id(token)] = {"name": contact_name, "pair": b64(pair), "created": now,
-                                             "expires": now + lifetime, "key": None}
+                                             "expires": now + lifetime, "state": "open", "key": None}
     return make_card(identity, token, pair, expires=now + lifetime)
+
+
+def replace_token(identity: dict, old_token_id: str) -> str:
+    """A fresh token for a contact that is already pinned (SPEC 4). The card carries a random pairing
+    secret that is not stored anywhere, so the card cannot pair anyone."""
+    contact = identity["contacts"].pop(old_token_id)
+    if not contact.get("key"):
+        raise ValueError("only a pending or paired contact gets a replacement token")
+    token = os.urandom(32)
+    identity["contacts"][token_id(token)] = contact
+    return make_card(identity, token, os.urandom(16))
+
+
+def prune_contacts(identity: dict, now: int) -> None:
+    """Open contacts whose card has expired can never pair: drop them, and with them their tokens."""
+    for key in [k for k, c in identity["contacts"].items() if c.get("state", "open") == "open" and c["expires"] < now]:
+        del identity["contacts"][key]
 
 
 # --- messages (SPEC 5) ---------------------------------------------------------
@@ -278,7 +350,8 @@ def seal_message(identity: dict, card: dict, ticket: dict, *, expires: int | Non
         message["expires"] = expires
     message.update(_override or {})  # only the test vectors use this, to build messages that must be refused
     m = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode()
-    return seal_signed(sign_message(identity, m), card["key"])
+    key = card["key"] if isinstance(card["key"], bytes) else unb64(card["key"], 32)
+    return seal_signed(sign_message(identity, m), key)
 
 
 def sign_message(identity: dict, m: bytes) -> bytes:
@@ -357,16 +430,21 @@ def open_message(identity: dict, sealed: bytes, *, now: int | None = None) -> tu
 
 
 class CardMisuse(Discard):
-    """A card that belongs to a paired contact was used by someone else (SPEC 3.3)."""
+    """The card of a pending or paired contact was used by a second party (SPEC 3.3)."""
 
     def __init__(self, contact: dict):
-        super().__init__(f"the card issued to {contact['name']} was used by someone else")
+        super().__init__(f"the card issued to {contact['name']} was used by a second party; compare fingerprints")
         self.contact = contact
+
+
+class LocalFailure(RuntimeError):
+    """Our own fault (disk, state), not the message's: stop without deleting anything (SPEC 5.4)."""
 
 
 def find_contact(identity: dict, sender_key: bytes, message: dict, now: int) -> tuple[dict, bool]:
     """SPEC 3.3. Returns (contact, is_candidate) or raises Discard. Nothing is changed here."""
     key = b64(sender_key)
+    # Rule 1 first: a key that is pinned anywhere is that contact, whatever secret the message carries.
     contact = next((c for c in identity["contacts"].values() if c.get("key") == key), None)
     candidate = False
     if contact is None:
@@ -376,7 +454,7 @@ def find_contact(identity: dict, sender_key: bytes, message: dict, now: int) -> 
                 matched = c
         if matched is None:
             raise Discard("from nobody this printer knows")
-        if matched.get("key"):
+        if matched["state"] != "open":
             raise CardMisuse(matched)
         if matched["expires"] < now:
             raise Discard(f"the card issued to {matched['name']} has expired for pairing")
@@ -386,53 +464,134 @@ def find_contact(identity: dict, sender_key: bytes, message: dict, now: int) -> 
     return contact, candidate
 
 
-def handle_message(identity: dict, sealed: bytes, now: int, persist=None) -> tuple[dict, dict] | None:
-    """Steps 1 to 10 of SPEC 5.4 for one sealed message. Returns (contact, message) for a ticket that
-    was put in the queue, or None for an authentic message that prints nothing. Raises Discard otherwise."""
+def handle_message(identity: dict, sealed: bytes, now: int, persist=None, auto_confirm: bool = False) -> dict | None:
+    """Steps 1 to 10 of SPEC 5.4 for one sealed message. Returns the queue entry for a ticket, or None
+    for an authentic message that prints nothing. Raises Discard for a message that must be dropped.
+
+    A queue entry is {"contact", "message", "held"}: held tickets belong to a contact the owner has
+    not confirmed yet. When the message pairs a contact, the entry also has "notice": the text the
+    owner must be shown (SPEC 3.3).
+    """
     sender_key, message = open_message(identity, sealed, now=now)                     # steps 1-6
     seen_key = f"{b64(sender_key)}:{message['id']}"
     if seen_key in identity["seen"]:                                                   # step 7
         raise Discard("already handled")
     contact, candidate = find_contact(identity, sender_key, message, now)             # step 8
-    is_ticket = message["type"] == "ticket"
-    if is_ticket:
-        validate_ticket(message["ticket"])
-    elif candidate:                                                                    # step 9
-        raise Discard("a first message that is not a ticket does not pair")
-    # One durable step: the record, the pin, and the ticket in the queue.
+    problem = None                                                                     # step 9
+    if message["type"] != "ticket":
+        problem = "not a ticket"
+    else:
+        try:
+            validate_ticket(message["ticket"])
+        except Discard as e:
+            problem = str(e)
+    if problem and candidate:
+        raise Discard(f"a first message must be a valid ticket to pair ({problem})")
+    held = sum(1 for q in identity["queue"] if q["held"] and q["contact"] == contact["name"])
+    if not problem and not candidate and contact["state"] == "pending" and held >= HELD_MAX:
+        problem = "too many tickets held for a contact that is not confirmed"
+
+    # Step 10, one durable step: the record, the pin and state, and the ticket in the queue.
+    entry = None
     identity["seen"][seen_key] = now
-    if candidate:
-        contact["key"] = b64(sender_key)
-        print(f"paired with {contact['name']} (key {b64(sender_key)[:8]}...)", file=sys.stderr)
-    if is_ticket:
-        identity["queue"].append({"contact": contact["name"], "message": message})
+    if not problem:
+        if candidate:
+            contact["key"] = b64(sender_key)
+            contact["state"] = "paired" if auto_confirm else "pending"
+        entry = {"contact": contact["name"], "message": message, "held": contact["state"] == "pending"}
+        if candidate:
+            entry["notice"] = pairing_notice(contact, message)
+        identity["queue"].append(entry)
     if persist:
-        persist()
-    return (contact, message) if is_ticket else None                                   # step 10
+        try:
+            persist()
+        except Exception as e:
+            raise LocalFailure(f"cannot save state: {type(e).__name__}") from e
+    if problem:
+        raise Discard(problem)
+    return entry
+
+
+def pairing_notice(contact: dict, message: dict) -> str:
+    """What the owner is shown when a contact is paired: fixed words, OUR name, and the fingerprint."""
+    lines = [f"NEW CONTACT: someone used the card you issued to {clean_text(contact['name'])}.",
+             f"Fingerprint of their printer: {fingerprint(unb64(contact['key'], 32))}"]
+    if message.get("from_name"):
+        lines.append(f"They call themselves (unverified): {clean_text(message['from_name'])}")
+    lines.append("Compare the fingerprint with them, then confirm or decline." if contact["state"] == "pending"
+                 else "This client confirms new contacts automatically.")
+    return "\n".join(lines)
+
+
+def confirm(identity: dict, contact_name: str) -> int:
+    """pending -> paired (SPEC 3.3). Returns how many held tickets were released."""
+    contact = next((c for c in identity["contacts"].values() if c["name"] == contact_name and c["state"] == "pending"), None)
+    if contact is None:
+        raise ValueError(f"no contact named {contact_name} is waiting for confirmation")
+    contact["state"] = "paired"
+    released = [q for q in identity["queue"] if q["held"] and q["contact"] == contact_name]
+    for q in released:
+        q["held"] = False
+    return len(released)
+
+
+def remove_contact(identity: dict, contact_name: str) -> None:
+    """Decline or remove: the contact, its pinned key, its secret and its waiting tickets all go."""
+    gone = [k for k, c in identity["contacts"].items() if c["name"] == contact_name]
+    if not gone:
+        raise ValueError(f"no contact named {contact_name}")
+    for key in gone:
+        del identity["contacts"][key]
+    identity["queue"] = [q for q in identity["queue"] if q["contact"] != contact_name]
 
 
 # --- relay (SPEC 6) ------------------------------------------------------------
 
+def _embedded_ipv4(ip: ipaddress.IPv6Address):
+    """The IPv4 address an IPv6 address carries, if it is one of the transition forms (SPEC 1.2)."""
+    n = int(ip)
+    for network, shift in (("::ffff:0:0/96", 0), ("::/96", 0), ("::ffff:0:0:0/96", 0), ("64:ff9b::/96", 0),
+                           ("64:ff9b:1::/48", 0), ("2002::/16", 80)):
+        if ip in ipaddress.ip_network(network):
+            return ipaddress.IPv4Address((n >> shift) & 0xFFFFFFFF)
+    if ip in ipaddress.ip_network("2001::/32"):  # Teredo: the client's address is stored inverted in the last 32 bits
+        return ipaddress.IPv4Address(~n & 0xFFFFFFFF)
+    return None
+
+
+def is_public_address(text: str) -> bool:
+    """SPEC 1.2: a globally reachable unicast address, judging IPv6 transition forms by the IPv4 inside."""
+    try:
+        ip = ipaddress.ip_address(text.split("%")[0])
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip in (ipaddress.IPv6Address("::"), ipaddress.IPv6Address("::1")):
+            return False
+        inner = _embedded_ipv4(ip)
+        if inner is not None:
+            ip = inner
+        elif ip.is_multicast or ip.is_site_local or ip.is_link_local or ip.is_private:
+            return False
+    return ip.is_global and not ip.is_multicast and not ip.is_reserved
+
+
 def _public_address(host: str, port: int) -> str:
-    """Resolve once and insist that every address is public (SPEC 1.2). Returns the one to connect to."""
+    """Resolve once and insist that every address is public. Returns the one to connect to."""
     try:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as e:
         raise RuntimeError(f"cannot resolve {host}") from e
     addresses = [info[4][0] for info in infos]
-    for text in addresses:
-        ip = ipaddress.ip_address(text.split("%")[0])
-        mapped = getattr(ip, "ipv4_mapped", None)
-        if not (mapped or ip).is_global:
-            raise RuntimeError(f"{host} resolves to an address that is not public; refusing to connect")
+    if not addresses or not all(is_public_address(a) for a in addresses):
+        raise RuntimeError(f"{host} resolves to an address that is not public; refusing to connect")
     return addresses[0]
 
 
-def _http(method: str, host: str, path: str, body: bytes | None, headers: dict) -> tuple[int, bytes, dict]:
+def _http(method: str, host: str, path: str, body: bytes | None, headers: dict, *, deadline: float = REQUEST_DEADLINE) -> tuple[int, bytes, dict]:
     """One request with a deadline for the whole exchange, no redirects, and a bounded response."""
     if not is_host(host):
         raise RuntimeError("not a relay host")
-    deadline = time.monotonic() + REQUEST_DEADLINE
     name, _, port = host.partition(":")
     if DEV_HOST.fullmatch(host) and dev_mode():  # plain HTTP to localhost, development only (SPEC 3.1)
         connection = http.client.HTTPConnection(name, int(port or 80), timeout=10)
@@ -441,24 +600,42 @@ def _http(method: str, host: str, path: str, body: bytes | None, headers: dict) 
         connection = http.client.HTTPSConnection(name, int(port or 443), timeout=10, context=ssl.create_default_context())
         # Connect to the address that was checked; the certificate is still verified against the name.
         connection._create_connection = lambda _address, *args, **kwargs: socket.create_connection((target, int(port or 443)), *args, **kwargs)
+
+    # The deadline covers everything, however slowly the other side sends: when it passes, the
+    # connection is torn down from a timer, which makes whatever read is blocked fail.
+    expired = threading.Event()
+
+    def give_up():
+        expired.set()
+        sock = connection.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            sock.close()
+    timer = threading.Timer(deadline, give_up)
+    timer.daemon = True
+    timer.start()
     try:
         connection.request(method, path, body=body, headers={"User-Agent": "bonvoyage", "Host": host, **headers})
         response = connection.getresponse()  # http.client never follows redirects
         chunks, size = [], 0
         while True:
-            if time.monotonic() > deadline:
-                raise RuntimeError("relay took too long")
-            chunk = response.read(65536)
+            chunk = response.read1(65536)
             if not chunk:
                 break
             size += len(chunk)
             if size > MAX_RESPONSE:
                 raise RuntimeError("relay response is too large")
             chunks.append(chunk)
+        if expired.is_set():
+            raise RuntimeError("relay took too long")
         return response.status, b"".join(chunks), {k.lower(): v for k, v in response.getheaders()}
-    except (OSError, http.client.HTTPException) as e:
-        raise RuntimeError(f"cannot reach {host}: {type(e).__name__}") from e
+    except (OSError, http.client.HTTPException, ValueError) as e:
+        raise RuntimeError("relay took too long" if expired.is_set() else f"cannot reach {host}: {type(e).__name__}") from e
     finally:
+        timer.cancel()
         connection.close()
 
 
@@ -470,26 +647,46 @@ def _relay_json(raw: bytes):
 
 
 def owner_request(identity: dict, method: str, path: str, body: dict | None = None, *, now: int | None = None,
-                  _retry: bool = True):
+                  extra: dict | None = None, _retry: bool = True):
     """A signed request to our own relay. Returns (status, parsed body or None, response headers)."""
     data = b"" if body is None else json.dumps(body).encode()
     t = str(int(time.time()) if now is None else now)
     signing_input = f"{REQUEST_CONTEXT}{method}\n{identity['relay']}\n{path}\n{t}\n{hashlib.sha256(data).hexdigest()}".encode()
     signature = SigningKey(unb64(identity["sign"])).sign(signing_input).signature
     status, raw, headers = _http(method, identity["relay"], path, data if body is not None else None,
-                                 {"Bonvoyage-Auth": f"t={t},sig={b64(signature)}"})
+                                 {"Bonvoyage-Auth": f"t={t},sig={b64(signature)}", **(extra or {})})
     if status == 409 and _retry and now is None:
         # An inbox change must carry a later time than the previous one (SPEC 6.2). Sign again, a second later.
         time.sleep(1.1)
-        return owner_request(identity, method, path, body, _retry=False)
+        return owner_request(identity, method, path, body, extra=extra, _retry=False)
     return status, _relay_json(raw), headers
 
 
-def register(identity: dict) -> None:
-    """Create the inbox, or replace its list of accepted tokens."""
-    status, answer, _ = owner_request(identity, "PUT", f"/v1/inbox/{inbox_id(identity)}", {"tokens": sorted(identity["contacts"])})
+def relay_info(host: str) -> tuple[dict, dict]:
+    status, raw, headers = _http("GET", host, "/v1", None, {})
+    info = _relay_json(raw)
+    if status != 200 or not isinstance(info, dict):
+        raise RuntimeError(f"{host} does not answer like a Bonvoyage relay")
+    return info, headers
+
+
+def register(identity: dict, *, now: int | None = None) -> None:
+    """Create the inbox, or replace its list of accepted tokens. Does the relay's proof of work when
+    the inbox is new (SPEC 6.3) and remembers the answer."""
+    prune_contacts(identity, int(time.time()) if now is None else now)
+    me = inbox_id(identity)
+    body = {"tokens": sorted(identity["contacts"])}
+    extra = {"Bonvoyage-Pow": identity["pow"]["nonce"]} if identity.get("pow") else {}
+    status, answer, _ = owner_request(identity, "PUT", f"/v1/inbox/{me}", body, extra=extra)
+    if status == 403:
+        info, _ = relay_info(identity["relay"])
+        bits = info.get("pow_bits")
+        if is_int(bits, 1, 33) and (identity.get("pow") or {}).get("bits", 0) < bits:
+            print(f"doing proof of work for a new inbox ({bits} bits, a few seconds)...", file=sys.stderr)
+            identity["pow"] = {"bits": bits, "nonce": proof_of_work(me, bits)}
+            status, answer, _ = owner_request(identity, "PUT", f"/v1/inbox/{me}", body, extra={"Bonvoyage-Pow": identity["pow"]["nonce"]})
     if status != 200:
-        detail = clean_text(str((answer or {}).get("error", "")))[:80] if isinstance(answer, dict) else ""
+        detail = clean_text(str(answer.get("error", "")))[:80] if isinstance(answer, dict) else ""
         raise RuntimeError(f"relay refused the inbox: {status} {detail}".strip())
 
 
@@ -501,30 +698,35 @@ def drop(card: dict, sealed: bytes) -> None:
         raise RuntimeError(f"relay refused the message: {status}")
 
 
-def _clock_is_trustworthy(headers: dict, now: int) -> bool:
-    """SPEC 5.4 "Clocks": with a clock that is far off we would discard good messages."""
+def clock_is_right(headers: dict, now: int) -> bool:
+    """SPEC 5.4 "Clocks": no Date header, or one that differs too much, means: do not handle anything."""
     try:
         relay_time = parsedate_to_datetime(headers.get("date", "")).timestamp()
     except (TypeError, ValueError):
-        return True  # no usable Date header: nothing to compare with
+        return False
     return abs(relay_time - now) <= CLOCK_SKEW
 
 
-def receive(identity: dict, *, now: int | None = None, persist=None) -> list[tuple[dict, dict]]:
-    """Collect and handle waiting messages (SPEC 5.4). Tickets that may be printed are appended to
-    identity["queue"] and also returned as (contact, message) pairs.
+def receive(identity: dict, *, now: int | None = None, persist=None, auto_confirm: bool = False) -> list[dict]:
+    """Collect and handle waiting messages (SPEC 5.4). Returns the new queue entries; they are also in
+    identity["queue"], which is what a client prints from.
 
-    `persist` is called once per accepted message, after it is recorded and queued and before it is
-    deleted from the relay, so a crash loses neither the record nor the ticket (step 9).
+    `persist` saves the identity. It is called once per accepted message, after the message is
+    recorded and queued and before it is deleted from the relay, so a crash loses neither the record
+    nor the ticket. If it fails, receiving stops and nothing is deleted.
     """
     real_now = int(time.time())
     now = real_now if now is None else now
     me = inbox_id(identity)
     status, answer, headers = owner_request(identity, "GET", f"/v1/inbox/{me}/messages")
+    if status == 404:
+        register(identity)  # the relay removed an unused inbox (SPEC 6.3): create it again and carry on
+        return []
     if status != 200 or not isinstance(answer, dict) or not isinstance(answer.get("messages"), list):
         raise RuntimeError(f"cannot collect: {status}")
-    if not _clock_is_trustworthy(headers, real_now):
-        raise RuntimeError("this computer's clock differs from the relay's by more than 5 minutes; fix it first")
+    if not clock_is_right(headers, real_now):
+        raise RuntimeError("this computer's clock differs from the relay's by more than 5 minutes (or the relay sent no Date); "
+                           "nothing was handled")
     identity["seen"] = {k: t for k, t in identity["seen"].items() if t > now - REMEMBER}
     accepted = []
     for item in answer["messages"][:20]:
@@ -532,17 +734,21 @@ def receive(identity: dict, *, now: int | None = None, persist=None) -> list[tup
         if not isinstance(relay_id, str) or not RELAY_MESSAGE_ID.fullmatch(relay_id):
             continue  # not something we can even ask the relay to delete
         try:
-            result = handle_message(identity, unb64(item.get("body")), now, persist)
-            if result:
-                accepted.append(result)
+            entry = handle_message(identity, unb64(item.get("body")), now, persist, auto_confirm)
+            if entry:
+                accepted.append(entry)
+        except LocalFailure:
+            raise  # our own problem: the message stays at the relay
         except CardMisuse as e:
             # Tell the owner at most once a day per contact, and never on paper (SPEC 3.3).
             if now - e.contact.get("alerted", 0) >= 86400:
                 e.contact["alerted"] = now
                 print(f"ALERT: {e}", file=sys.stderr)
+                if persist:
+                    persist()
         except Discard as e:
             print(f"discarded a message: {e}", file=sys.stderr)
-        except Exception as e:  # any error at all means: discard and carry on (SPEC 5.4)
+        except Exception as e:  # an error caused by the message: discard and carry on
             print(f"discarded a message: unexpected {type(e).__name__}", file=sys.stderr)
         try:
             owner_request(identity, "DELETE", f"/v1/inbox/{me}/messages/{relay_id}")   # step 11
@@ -563,7 +769,10 @@ def png_size(data: bytes) -> tuple[int, int]:
         raise Discard("image is not a PNG")
     if zlib.crc32(data[12:29]) != struct.unpack(">I", data[29:33])[0]:
         raise Discard("image header is damaged")
-    return struct.unpack(">II", data[16:24])
+    width, height, depth, colour, _compression, _filter, interlace = struct.unpack(">IIBBBBB", data[16:29])
+    if colour != 0 or depth not in (1, 8) or interlace != 0:
+        raise Discard("image must be plain greyscale, 1 or 8 bits, not interlaced")
+    return width, height
 
 
 def _dressing(block: dict, member: str) -> str:
@@ -660,11 +869,12 @@ def _load(path: str) -> dict:
     with open(path, encoding="utf-8") as f:
         identity = json.load(f)
     identity.setdefault("queue", [])
+    identity.setdefault("cards", {})
     return identity
 
 
 def _save(path: str, identity: dict) -> None:
-    """Write through a fresh, private temporary file and rename it over the old one."""
+    """Write through a fresh, private temporary file, rename it over the old one, and make that stick."""
     directory = os.path.dirname(os.path.abspath(path))
     handle, temporary = tempfile.mkstemp(dir=directory, prefix=".bonvoyage-")  # created exclusively, mode 0600
     try:
@@ -673,9 +883,33 @@ def _save(path: str, identity: dict) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(temporary, path)
+        folder = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(folder)
+        finally:
+            os.close(folder)
     except BaseException:
-        os.unlink(temporary)
+        if os.path.exists(temporary):
+            os.unlink(temporary)
         raise
+
+
+def _show_queue(path: str, identity: dict) -> None:
+    """Print what may be printed. Tickets of a contact that is not confirmed stay in the queue."""
+    for entry in list(identity["queue"]):
+        if entry.get("notice"):
+            print(entry.pop("notice"))
+            _save(path, identity)
+        if entry["held"]:
+            continue
+        # The label is OUR name for the contact, never the name the sender claims (SPEC 8).
+        print(f"--- from {clean_text(entry['contact'])} ---")
+        print(render_text(entry["message"]["ticket"]))
+        identity["queue"].remove(entry)
+        _save(path, identity)
+    held = sorted({q["contact"] for q in identity["queue"] if q["held"]})
+    for name in held:
+        print(f"(tickets from {clean_text(name)} are waiting: run 'confirm' or 'decline' for that contact)")
 
 
 def main() -> None:
@@ -683,11 +917,19 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("init", help="create an identity and its inbox")
     p.add_argument("file"), p.add_argument("--relay", required=True), p.add_argument("--name", default="")
-    p = sub.add_parser("card", help="issue a contact card for someone")
+    p = sub.add_parser("card", help="issue a contact card for someone who will send to you")
     p.add_argument("file"), p.add_argument("contact")
-    p = sub.add_parser("send", help="send a text ticket to the issuer of a card")
-    p.add_argument("file"), p.add_argument("card"), p.add_argument("text")
+    p = sub.add_parser("add", help="take in a card someone gave you, under a name of your choosing")
+    p.add_argument("file"), p.add_argument("name"), p.add_argument("card")
+    p = sub.add_parser("send", help="send a text ticket to someone whose card you added")
+    p.add_argument("file"), p.add_argument("name"), p.add_argument("text")
     p = sub.add_parser("receive", help="collect and show waiting tickets")
+    p.add_argument("file")
+    p = sub.add_parser("confirm", help="accept a new contact after comparing fingerprints")
+    p.add_argument("file"), p.add_argument("contact")
+    p = sub.add_parser("decline", help="refuse a new contact, or remove an existing one")
+    p.add_argument("file"), p.add_argument("contact")
+    p = sub.add_parser("fingerprint", help="show the fingerprint of your own printer")
     p.add_argument("file")
     args = parser.parse_args()
 
@@ -709,24 +951,39 @@ def main() -> None:
             register(identity)
             _save(args.file, identity)
             print(card)
+        elif args.command == "add":
+            card = parse_card(args.card)  # checked once, now; its expiry is not looked at again (SPEC 3.2)
+            identity["cards"][args.name] = {**card, "key": b64(card["key"])}
+            _save(args.file, identity)
+            print(f"added {args.name}. Send a first ticket soon: the card stops working for pairing"
+                  + (f" on {time.strftime('%d %b %Y', time.localtime(card['expires']))}." if card["expires"] else " after a while."))
         elif args.command == "send":
-            card = parse_card(args.card)
+            card = identity["cards"].get(args.name)
+            if card is None:
+                sys.exit(f"error: no card for {args.name}; use 'add' first")
             ticket = {"blocks": [{"type": "text", "text": args.text}]}
             validate_ticket(ticket)
-            drop(card, seal_message(identity, card, ticket))
-            print(f"sent to {card['name'] or card['address']}")
+            sealed = seal_message(identity, card, ticket)
+            lock.close()  # the relay in a card is someone else's: never hold up receiving while talking to it (SPEC 6)
+            drop(card, sealed)
+            print(f"sent to {args.name}")
         elif args.command == "receive":
             try:
                 receive(identity, persist=lambda: _save(args.file, identity))
             finally:
-                # Whatever happened above, tickets that were accepted are in the queue: show them.
-                while identity["queue"]:
-                    entry = identity["queue"][0]
-                    # The label is OUR name for the contact, never the name the sender claims (SPEC 8).
-                    print(f"--- from {clean_text(entry['contact'])} ---")
-                    print(render_text(entry["message"]["ticket"]))
-                    identity["queue"].pop(0)
-                    _save(args.file, identity)
+                _show_queue(args.file, identity)  # whatever happened, show what was accepted
+        elif args.command == "confirm":
+            released = confirm(identity, args.contact)
+            _save(args.file, identity)
+            print(f"{args.contact} is now a contact ({released} waiting ticket(s) released)")
+            _show_queue(args.file, identity)
+        elif args.command == "decline":
+            remove_contact(identity, args.contact)
+            register(identity)
+            _save(args.file, identity)
+            print(f"{args.contact} was removed")
+        elif args.command == "fingerprint":
+            print(fingerprint(unb64(inbox_id(identity), 32)))
     except (Discard, RuntimeError, ValueError) as e:
         sys.exit(f"error: {e}")
     finally:

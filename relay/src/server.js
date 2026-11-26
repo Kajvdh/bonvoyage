@@ -1,18 +1,28 @@
 // Self-hosted entry point: `node src/server.js`.
 // Put it behind a reverse proxy that terminates HTTPS and does not log client addresses.
 import { existsSync, readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { createRelay } from "./core.js";
 import { NodeStore } from "./store-node.js";
 
 const port = Number(process.env.PORT || 8787);
-// RELAY_HOST: the host name clients use for this relay. Set it: owner requests signed for any
-// other host are then refused, whatever the proxy in front passes on as Host.
-// TRUST_PROXY=1: take the client address from X-Forwarded-For (only behind your own proxy).
+// RELAY_HOST: the host name clients use for this relay, as in addresses (for example relay.example
+//   or relay.example:8443). Required: it is what inbox owners sign their requests for, so the relay
+//   must know it for itself and not take it from a header (SPEC 6.2).
+// TRUST_PROXY=1: take the client address from the last X-Forwarded-For entry, the one your own
+//   reverse proxy appended. Only behind a proxy you control.
+const relayHost = (process.env.RELAY_HOST || "").toLowerCase();
+if (!/^[a-z0-9.-]+(:[1-9][0-9]{0,4})?$/.test(relayHost)) {
+  console.error("Set RELAY_HOST to the host name clients use for this relay, for example RELAY_HOST=relay.example");
+  process.exit(1);
+}
 const relay = createRelay(new NodeStore(process.env.BONVOYAGE_DB || "bonvoyage.db"), {
-  host: (process.env.RELAY_HOST || "").toLowerCase(),
+  host: relayHost,
   registration: ["closed", "invite"].includes(process.env.REGISTRATION) ? process.env.REGISTRATION : "open",
   inviteCode: process.env.INVITE_CODE || "",
+  powBits: Number(process.env.POW_BITS || 0),
+  counterSalt: randomBytes(16).toString("hex"), // new at every start; counters are short-lived anyway
 });
 const MAX_BODY = 65536;
 
@@ -59,7 +69,8 @@ async function serve(req, res) {
     headers: req.headers,
     body: req.method === "GET" ? undefined : Buffer.concat(chunks),
   });
-  const forwarded = process.env.TRUST_PROXY === "1" ? String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() : "";
+  // The last entry is the one our own proxy added; earlier ones are whatever the client claimed.
+  const forwarded = process.env.TRUST_PROXY === "1" ? String(req.headers["x-forwarded-for"] || "").split(",").pop().trim() : "";
   const response = await relay.fetch(request, forwarded || req.socket.remoteAddress || "");
   res.writeHead(response.status, Object.fromEntries(response.headers));
   res.end(Buffer.from(await response.arrayBuffer()));
@@ -73,5 +84,6 @@ const server = createServer((req, res) => {
   });
 });
 
-setInterval(() => relay.cleanup().catch(() => {}), 6 * 3600 * 1000).unref();
+relay.cleanup().catch(() => {});
+setInterval(() => relay.cleanup().catch(() => {}), 3600 * 1000).unref();
 server.listen(port, () => console.log(`bonvoyage relay listening on :${port}`));

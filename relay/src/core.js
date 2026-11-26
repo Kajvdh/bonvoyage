@@ -12,22 +12,22 @@ const SEAL_OVERHEAD = 48;
 const encoder = new TextEncoder();
 
 export const DEFAULTS = {
-  host: "",                        // the relay's own host; when set, owner requests for any other host are refused
+  host: "",                        // the relay's own host. When set, it is what owners must have signed for,
+                                   // whatever Host header arrives; when empty, the host of the request URL is used.
   maxMessageBytes: SEAL_OVERHEAD + 15 * BLOCK, // 61488, the largest sealed message (SPEC 5.3)
-  maxMessages: 50,                 // waiting in one established inbox
+  maxMessages: 50,                 // waiting in one inbox
   maxMessagesPerToken: 10,
-  newInboxMaxMessages: 5,          // waiting in an inbox that is not established yet
-  establishedAfterDays: 3,         // an inbox is established once collected from on this many different days
-  maxTotalMessages: 3000,          // across all inboxes: bounds the relay's storage
-  maxNewInboxMessages: 600,        // of which at most this many in inboxes that are not established
-  statsSeconds: 600,               // how stale the running totals may get
+  maxTotalMessages: 3000,          // across all inboxes; when reached, the fullest inbox loses its oldest message
   retentionSeconds: 7 * 24 * 3600,
   maxTokens: 64,
-  maxInboxes: 5000,
+  maxInboxes: 5000,                // when reached, the inbox unused the longest makes room
+  evictIdleSeconds: 24 * 3600,     // ...provided it has been unused for at least this long
+  powBits: 0,                      // proof of work asked for a new inbox (SPEC 6.3); 0 = none
   maxNewInboxesPerHour: 200,
   maxNewInboxesPerAddressPerHour: 20,
-  unestablishedSeconds: 7 * 24 * 3600,
-  inactiveSeconds: 180 * 24 * 3600,
+  counterSalt: "",                 // mixed into the per-address counter keys, so they cannot be reversed
+  neverCollectedSeconds: 7 * 24 * 3600,
+  inactiveSeconds: 30 * 24 * 3600,
   clockSkewSeconds: 300,
   collectBatch: 20,
   pollSeconds: 300,                // how long clients are asked to wait between collections
@@ -65,6 +65,17 @@ export async function requestSigningInput(method, host, path, time, body) {
   return encoder.encode(`bonvoyage-v1-request\n${method}\n${host}\n${path}\n${time}\n${await sha256hex(body)}`);
 }
 
+/** Leading zero bits of SHA-256("bonvoyage-v1-pow\n" || inbox ID || "\n" || nonce) (SPEC 6.3). */
+export async function powBits(inboxId, nonce) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(`bonvoyage-v1-pow\n${inboxId}\n${nonce}`)));
+  let bits = 0;
+  for (const byte of digest) {
+    if (byte === 0) { bits += 8; continue; }
+    return bits + Math.clz32(byte) - 24;
+  }
+  return bits;
+}
+
 /** What a rate limit counts per: an IPv4 address, or the /64 of an IPv6 address. */
 export function addressKey(address) {
   if (typeof address !== "string" || !address) return "";
@@ -87,7 +98,8 @@ function sameText(a, b) {
 function json(status, data, headers = {}) {
   return new Response(data === null ? null : JSON.stringify(data), {
     status,
-    headers: { "cache-control": "no-store", ...(data === null ? {} : { "content-type": "application/json" }), ...headers },
+    // Date lets clients notice that their own clock is wrong (SPEC 5.4).
+    headers: { date: new Date().toUTCString(), "cache-control": "no-store", ...(data === null ? {} : { "content-type": "application/json" }), ...headers },
   });
 }
 
@@ -124,17 +136,15 @@ async function readBody(request, limit) {
 
 export function createRelay(store, options = {}) {
   const cfg = { ...DEFAULTS, ...options };
-  const isEstablished = (inbox) => inbox.collectDays >= cfg.establishedAfterDays;
-
   const info = () => json(200, {
     bonvoyage: 1,
     max_message_bytes: cfg.maxMessageBytes,
     max_messages: cfg.maxMessages,
     max_messages_per_token: cfg.maxMessagesPerToken,
-    new_inbox_max_messages: cfg.newInboxMaxMessages,
     retention_seconds: cfg.retentionSeconds,
     max_tokens: cfg.maxTokens,
     poll_seconds: cfg.pollSeconds,
+    pow_bits: cfg.powBits,
     registration: cfg.registration,
   });
 
@@ -145,7 +155,6 @@ export function createRelay(store, options = {}) {
   async function ownerTime(request, ctx, body) {
     const match = authShape(request);
     if (!match) return 0;
-    if (cfg.host && ctx.host !== cfg.host) return 0;
     const time = Number(match[1]);
     if (Math.abs(cfg.now() - time) > cfg.clockSkewSeconds) return 0;
     const key = unb64url(ctx.id);
@@ -160,10 +169,8 @@ export function createRelay(store, options = {}) {
     }
   }
 
-  /** A PUT or DELETE of an inbox must be newer than the last one accepted for it (SPEC 6.2). */
-  async function isNewer(id, inbox, time) {
-    const last = inbox ? inbox.lastAuth : await store.getTombstone(id);
-    return time > last;
+  async function totals(now) {
+    return (await store.getStats()) ?? store.recomputeStats(now);
   }
 
   async function putInbox(request, ctx) {
@@ -184,41 +191,43 @@ export function createRelay(store, options = {}) {
     tokens = [...new Set(tokens)];
     const now = cfg.now();
     const inbox = await store.getInbox(ctx.id);
-    if (!(await isNewer(ctx.id, inbox, time))) return fail(409, "a later request was already accepted");
+    const stale = () => fail(409, "a later request was already accepted");
+    if (inbox ? time <= inbox.lastAuth : time <= (await store.getTombstone(ctx.id))) return stale();
     if (!inbox) {
       if (cfg.registration === "closed") return fail(403, "registration is closed");
       if (cfg.registration === "invite" && (!cfg.inviteCode || !sameText(request.headers.get("bonvoyage-invite") || "", cfg.inviteCode))) {
         return fail(403, "an invitation is required");
       }
+      if (cfg.powBits > 0) {
+        const nonce = request.headers.get("bonvoyage-pow") || "";
+        if (!/^(0|[1-9][0-9]{0,19})$/.test(nonce) || (await powBits(ctx.id, nonce)) < cfg.powBits) {
+          return fail(403, `a new inbox needs proof of work of ${cfg.powBits} bits`);
+        }
+      }
       const hour = Math.floor(now / 3600);
       if (ctx.client) {
-        const key = await sha256hex(encoder.encode(`new-inbox|${ctx.client}|${hour}`));
+        const key = await sha256hex(encoder.encode(`new-inbox|${cfg.counterSalt}|${ctx.client}|${hour}`));
         if ((await store.bumpCounter(key, hour)) > cfg.maxNewInboxesPerAddressPerHour) {
           return busy("too many new inboxes from this address, try later", 3600);
         }
       }
-      if ((await store.countInboxes()) >= cfg.maxInboxes) return fail(403, "relay is full");
-      if ((await store.countInboxesSince(now - 3600)) >= cfg.maxNewInboxesPerHour) {
-        return busy("too many new inboxes, try later", 900);
+      if ((await store.countInboxesSince(now - 3600)) >= cfg.maxNewInboxesPerHour) return busy("too many new inboxes, try later", 900);
+      // Full? Then the inbox that has gone unused the longest makes room. Its owner's client simply
+      // creates it again the next time it collects (SPEC 6.5).
+      if ((await totals(now)).inboxes >= cfg.maxInboxes && !(await store.evictIdleInbox(now - cfg.evictIdleSeconds))) {
+        return fail(503, "relay is full", { "retry-after": "3600" });
       }
     }
-    await store.putInbox(ctx.id, tokens, now, time);
+    // The time check and the write are one statement, so a request that was held back cannot slip in between.
+    if ((await store.putInbox(ctx.id, tokens, now, time)) === "stale") return stale();
     return json(200, { id: ctx.id, tokens });
   }
 
   async function deleteInbox(request, ctx) {
     const time = await ownerTime(request, ctx, EMPTY);
     if (!time) return fail(401, "not authorised");
-    const inbox = await store.getInbox(ctx.id);
-    if (!(await isNewer(ctx.id, inbox, time))) return fail(409, "a later request was already accepted");
-    await store.deleteInbox(ctx.id, time, cfg.now());
+    if (!(await store.deleteInbox(ctx.id, time, cfg.now()))) return fail(409, "a later request was already accepted");
     return json(204, null);
-  }
-
-  async function totals(now) {
-    const stats = await store.getStats();
-    if (now - stats.computed < cfg.statsSeconds) return stats;
-    return store.recomputeStats(now, cfg.establishedAfterDays);
   }
 
   async function drop(request, ctx) {
@@ -237,19 +246,17 @@ export function createRelay(store, options = {}) {
     // One answer for "no such inbox" and "token not accepted" (SPEC 6.4).
     if (!inbox || !inbox.tokens.includes(tokenId)) return fail(401, "not authorised");
     const now = cfg.now();
-    const established = isEstablished(inbox);
-    const stats = await totals(now);
-    if (stats.messages >= cfg.maxTotalMessages) return fail(503, "relay is full", { "retry-after": "3600" });
-    if (!established && stats.newMessages >= cfg.maxNewInboxMessages) return busy("no room for new inboxes right now", 3600);
-    const inboxLimit = established ? cfg.maxMessages : cfg.newInboxMaxMessages;
+    // Relay full? Make room rather than refuse: the inbox holding the most loses its oldest message.
+    for (let i = 0; i < 3 && (await totals(now)).messages >= cfg.maxTotalMessages; i++) {
+      if (!(await store.evictMessage())) break;
+    }
     const messageId = b64url(crypto.getRandomValues(new Uint8Array(16)));
     // The count and the insert are one statement, so concurrent drops cannot overshoot a quota.
     const stored = await store.addMessage({
       inbox: ctx.id, id: messageId, token: tokenId, body: b64url(body), now,
-      notBefore: now - cfg.retentionSeconds, inboxLimit, tokenLimit: Math.min(cfg.maxMessagesPerToken, inboxLimit),
+      notBefore: now - cfg.retentionSeconds, inboxLimit: cfg.maxMessages, tokenLimit: cfg.maxMessagesPerToken,
     });
     if (!stored) return busy("too many waiting messages", 300);
-    await store.bumpStats(!established);
     return json(201, { id: messageId });
   }
 
@@ -260,7 +267,8 @@ export function createRelay(store, options = {}) {
     const now = cfg.now();
     // A poll with nothing waiting costs two reads and no write: polling is by far the most common request.
     if (!inbox.lastCollected || now - inbox.lastCollected >= cfg.touchSeconds) {
-      await store.markCollected(ctx.id, now, Math.floor(now / 86400));
+      // If this write fails (for example because a daily allowance is used up) collecting still works.
+      await store.markCollected(ctx.id, now).catch(() => {});
     }
     const messages = await store.listMessages(ctx.id, cfg.collectBatch);
     const cutoff = now - cfg.retentionSeconds;
@@ -294,7 +302,7 @@ export function createRelay(store, options = {}) {
     const id = parts[3] || "";
     const key = ID.test(id) ? unb64url(id) : null; // canonical encodings only: one inbox per key
     if (parts[1] !== "v1" || parts[2] !== "inbox" || !key || key.length !== 32) return fail(404, "not found");
-    const ctx = { id, path, host: url.host.toLowerCase(), client: addressKey(client) };
+    const ctx = { id, path, host: cfg.host || url.host.toLowerCase(), client: addressKey(client) };
     if (parts.length === 4) {
       if (method === "PUT") return putInbox(request, ctx);
       if (method === "DELETE") return deleteInbox(request, ctx);
@@ -326,9 +334,9 @@ export function createRelay(store, options = {}) {
     cleanup: async () => {
       const now = cfg.now();
       await store.purgeMessages(now - cfg.retentionSeconds, null);
-      await store.purgeInboxes(now - cfg.inactiveSeconds, now - cfg.unestablishedSeconds, cfg.establishedAfterDays);
+      await store.purgeInboxes(now - cfg.inactiveSeconds, now - cfg.neverCollectedSeconds);
       await store.purgeShortLived(now - 2 * cfg.clockSkewSeconds - 60, Math.floor(now / 3600));
-      await store.recomputeStats(now, cfg.establishedAfterDays);
+      await store.recomputeStats(now);
     },
   };
 }

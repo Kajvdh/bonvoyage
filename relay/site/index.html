@@ -192,7 +192,7 @@ blockquote.prompt { margin:14px 0 0; padding:16px 18px; background:color-mix(in 
   </div>
 
   <ol class="steps">
-    <li><h3>Pair</h3><p>Hand someone a contact card, ideally as a QR code printed on a ticket. Whoever uses it first becomes that contact, so it is valid for a week and you can take it back.</p></li>
+    <li><h3>Pair</h3><p>Hand someone a contact card, ideally as a QR code printed on a ticket. When they first use it, your printer tells you and shows a fingerprint; you confirm once you have checked it with them.</p></li>
     <li><h3>Seal and drop</h3><p>The sender builds a ticket from simple blocks, signs it, seals it for you and drops it in your inbox on the relay.</p></li>
     <li><h3>Collect and print</h3><p>Your printer picks it up on its next round, every five minutes or so, verifies who it is from, applies your limits and quiet hours, and prints.</p></li>
   </ol>
@@ -209,10 +209,10 @@ blockquote.prompt { margin:14px 0 0; padding:16px 18px; background:color-mix(in 
       <p>Python 3.10 or newer, and git. The only library is PyNaCl, which provides the signing and sealing.</p>
       <h3 style="margin-top:22px">What happens</h3>
       <ul class="check">
-        <li>Two identities are created, each with its own inbox on the relay.</li>
+        <li>Two identities are created, each with its own inbox on the relay. That takes a few seconds of computing, once: it is what keeps the relay open without accounts.</li>
         <li>"Jan" issues a contact card for "Kaj": one line starting with <code>bonvoyage://</code>.</li>
-        <li>"Kaj" uses that card to send a signed, sealed ticket.</li>
-        <li>"Jan" collects it, checks who it is from, and shows it.</li>
+        <li>"Kaj" takes the card in and sends a signed, sealed ticket.</li>
+        <li>"Jan" collects and is told a new contact wants to pair, with a 12-digit fingerprint. It matches the one Kaj reads out, so Jan confirms and the ticket appears.</li>
       </ul>
       <p style="margin-top:18px">With a friend it works the same: each of you runs <code>init</code> once, then you swap cards.</p>
     </div>
@@ -230,14 +230,18 @@ python examples/bonvoyage.py init jan.json \
 python examples/bonvoyage.py card jan.json Kaj
 <span class="c">#  -> bonvoyage://...    copy that line</span>
 
-<span class="c"># Kaj sends Jan a ticket with it</span>
-python examples/bonvoyage.py send kaj.json \
-    <span class="s">'bonvoyage://...'</span> <span class="s">'Welcome to the club!'</span>
+<span class="c"># Kaj takes the card in and sends a ticket</span>
+python examples/bonvoyage.py add kaj.json Jan \
+    <span class="s">'bonvoyage://...'</span>
+python examples/bonvoyage.py send kaj.json Jan \
+    <span class="s">'Welcome to the club!'</span>
 
-<span class="c"># Jan collects</span>
+<span class="c"># Jan collects: "new contact", with a fingerprint</span>
 python examples/bonvoyage.py receive jan.json
-<span class="c">#  -> --- from Kaj ---</span>
-<span class="c">#     Welcome to the club!</span></code></pre>
+<span class="c"># Kaj reads his own out loud; it matches</span>
+python examples/bonvoyage.py fingerprint kaj.json
+<span class="c"># Jan confirms, and the ticket appears</span>
+python examples/bonvoyage.py confirm jan.json Kaj</code></pre>
   </div>
 </section>
 
@@ -247,7 +251,7 @@ python examples/bonvoyage.py receive jan.json
   <div class="grid">
     <div class="card"><span class="ico">&#128274;</span><h3>Private by design</h3><p>Tickets are signed and sealed end to end. The relay stores bytes it cannot open, and it cannot make your printer print something a contact did not send.</p></div>
     <div class="card"><span class="ico">&#127968;</span><h3>Nothing exposed at home</h3><p>No open ports, no tunnels, no public address for your printer. It makes ordinary outgoing HTTPS requests and nothing else.</p></div>
-    <div class="card"><span class="ico">&#9995;</span><h3>The recipient decides</h3><p>Strangers are dropped. Daily limits, quiet hours and approve-before-print are yours to set, and they always win.</p></div>
+    <div class="card"><span class="ico">&#9995;</span><h3>The recipient decides</h3><p>Strangers are dropped. A new contact is never added silently: you are shown a fingerprint and confirm. Daily limits and quiet hours are yours to set, and they always win.</p></div>
     <div class="card"><span class="ico">&#128295;</span><h3>Open to any printer</h3><p>The protocol is a short spec with test vectors. It is not tied to any software, printer brand or relay; addresses name their relay, like email.</p></div>
   </div>
 </section>
@@ -263,13 +267,13 @@ python examples/bonvoyage.py receive jan.json
         <li>what a ticket says or shows</li>
         <li>the sender's name or address <small>(they travel inside the sealed part)</small></li>
         <li>the names of your contacts</li>
-        <li>how long a ticket really is <small>(tickets are padded to fixed sizes)</small></li>
+        <li>the exact length of a ticket <small>(tickets are padded; the relay sees one of 15 size steps)</small></li>
       </ul>
     </div>
     <div class="card does">
       <h3>It does see</h3>
       <ul>
-        <li>that an inbox received something, and when</li>
+        <li>that an inbox exists, when its printer checks it, and when it receives something</li>
         <li>the padded size of each sealed ticket</li>
         <li>how many contacts you have, and how often each one writes <small>(each contact has their own pass for your inbox; the relay sees which pass was used, not whose it is)</small></li>
         <li>the IP address of whoever connects <small>(this relay keeps no request logs)</small></li>
@@ -332,7 +336,7 @@ python examples/bonvoyage.py receive jan.json
   <p class="eyebrow">This relay</p>
   <h2><span class="host" data-host>This relay</span> is free to use.</h2>
   <p class="lead">Point your client at it and your address becomes <code>&lt;your key&gt;@<span data-host>this relay</span></code>. No account, no sign-up: your printer's key is your identity.</p>
-  <p style="max-width:44em;color:var(--soft)">A new inbox starts small, with room for 5 waiting tickets, and gets its full quota once its printer has collected on three different days. That keeps the relay usable for everyone while staying open to anyone.</p>
+  <p style="max-width:44em;color:var(--soft)">Creating an inbox costs your computer a few seconds of work, once. When the relay is full it makes room rather than turning people away: the fullest inbox loses its oldest ticket, and an inbox that has gone unused for a long time gives up its place. A printer whose inbox was removed creates it again by itself. So a ticket is not a registered letter; it usually arrives, and nobody is told when it does not.</p>
   <dl class="limits">
     <div><dt>Per ticket</dt><dd data-limit="max_message_bytes">60 KB</dd></div>
     <div><dt>Waiting per contact</dt><dd data-limit="max_messages_per_token">10</dd></div>

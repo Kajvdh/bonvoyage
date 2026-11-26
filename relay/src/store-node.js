@@ -13,8 +13,16 @@ export class NodeStore {
     const files = readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")).sort();
     const done = db.prepare("PRAGMA user_version").get().user_version;
     files.slice(done).forEach((file, i) => {
-      db.exec(readFileSync(new URL(file, MIGRATIONS), "utf8"));
-      db.exec(`PRAGMA user_version = ${done + i + 1}`);
+      // All or nothing: an interrupted migration must not leave a half-changed database behind.
+      db.exec("BEGIN");
+      try {
+        db.exec(readFileSync(new URL(file, MIGRATIONS), "utf8"));
+        db.exec(`PRAGMA user_version = ${done + i + 1}`);
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
     });
     Object.assign(this, queries({
       run: async (sql, args) => Number(db.prepare(sql).run(...args).changes),

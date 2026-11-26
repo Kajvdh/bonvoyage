@@ -24,18 +24,21 @@ Needs Python 3.10+ and PyNaCl.
     cd bonvoyage
     pip install pynacl
 
-    # two printers (play both to try it)
+    # two printers (play both to try it); creating an inbox takes a few seconds of computing
     python examples/bonvoyage.py init kaj.json --relay bonvoyage.kaj.dev --name Kaj
     python examples/bonvoyage.py init jan.json --relay bonvoyage.kaj.dev --name Jan
 
     # Jan makes a contact card for Kaj; it prints one line starting with bonvoyage://
     python examples/bonvoyage.py card jan.json Kaj
 
-    # Kaj sends Jan a ticket with that card
-    python examples/bonvoyage.py send kaj.json 'bonvoyage://...' 'Welcome to the club!'
+    # Kaj takes the card in, and sends Jan a ticket
+    python examples/bonvoyage.py add kaj.json Jan 'bonvoyage://...'
+    python examples/bonvoyage.py send kaj.json Jan 'Welcome to the club!'
 
-    # Jan collects
+    # Jan collects: a new contact wants to pair, with a fingerprint
     python examples/bonvoyage.py receive jan.json
+    python examples/bonvoyage.py fingerprint kaj.json      # Kaj reads his out; it matches
+    python examples/bonvoyage.py confirm jan.json Kaj      # and the ticket appears
 
 With a friend it works the same: each of you runs `init` once, then you swap
 cards. The `.json` files hold private keys; keep them to yourself.
@@ -62,10 +65,12 @@ A client is the software between the relay and your printer. Two ways to get one
   to it. The cryptography is two libsodium functions: Ed25519 signatures and
   sealed boxes.
 
-Either way, the **test vectors** tell you whether the result is right. They
-are worked examples with the answers filled in: with exactly these keys and
-this ticket, the signature is exactly this, and this sealed message opens to
-exactly that. They also contain messages a correct client must refuse.
+Either way, the **test vectors** tell you whether the result is on the right
+track. They are worked examples with the answers filled in: with exactly these
+keys and this ticket, the signature is exactly this, and this sealed message
+opens to exactly that. They also contain messages, cards and tickets a correct
+client must refuse, and step-by-step pairing scenarios. Passing them all is
+necessary; it does not replace reading the spec.
 [`vectors/README.md`](vectors/README.md) lists what to check, step by step.
 
 Beyond the protocol, a client needs four things of its own: somewhere to keep
@@ -96,28 +101,29 @@ To serve it on your own domain, uncomment the `[[routes]]` block in
 
 ### On your own server
 
-Needs Node 22.13 or newer, nothing else.
+Needs Node 22.13 or newer, nothing else. `RELAY_HOST` is required: it is the
+name people use for your relay.
 
     cd relay
-    RELAY_HOST=relay.example BONVOYAGE_DB=/var/lib/bonvoyage/relay.db PORT=8787 node src/server.js
+    RELAY_HOST=relay.example POW_BITS=20 BONVOYAGE_DB=/var/lib/bonvoyage/relay.db PORT=8787 node src/server.js
 
 or with Docker:
 
     docker build -t bonvoyage-relay relay
-    docker run -d --restart unless-stopped -e RELAY_HOST=relay.example \
+    docker run -d --restart unless-stopped -e RELAY_HOST=relay.example -e POW_BITS=20 \
         -p 127.0.0.1:8787:8787 -v bonvoyage:/data bonvoyage-relay
 
-Put it behind a reverse proxy that provides HTTPS, and set `RELAY_HOST` to the
-name people use for it (see Settings). The proxy must pass the original `Host`
-header on. Configure it **not to log client addresses**; the relay itself logs
-nothing about requests. With Docker, add `--restart unless-stopped`.
+Put it behind a reverse proxy that provides HTTPS. Configure that proxy **not
+to log client addresses**; the relay itself logs nothing about requests.
 
 ### Settings
 
 | | |
 |---|---|
-| `RELAY_HOST` | The host name clients use for this relay, for example `relay.example`. **Set this when you host it yourself**: owner requests signed for any other host are then refused, which is what stops a request made to another relay from being replayed to yours. On Cloudflare the routing already guarantees it. |
-| `TRUST_PROXY` | Self-hosted only: `1` takes the client address from `X-Forwarded-For`. Use it only behind your own reverse proxy. The address is used for per-address limits and is never logged. |
+| `RELAY_HOST` | The host name clients use for this relay, as it appears in addresses: `relay.example`, or `relay.example:8443` for another port than 443. Required when you host it yourself; it is what inbox owners sign their requests for, which stops a request made to another relay from being replayed to yours. On Cloudflare it is optional, because only your own host names are routed to the Worker. |
+| `POW_BITS` | The proof of work a new inbox needs, 0 to 32. Each bit doubles the work: 20 costs a client a second or two, once. 0 switches it off. |
+| `TRUST_PROXY` | Self-hosted only: `1` takes the client address from the last `X-Forwarded-For` entry, the one your own reverse proxy appended. The address is used for per-address limits and is never logged. |
+| `COUNTER_SALT` | Cloudflare only: a random secret mixed into the short-lived per-address counters (`npx wrangler secret put COUNTER_SALT`). The self-hosted relay picks one at every start. |
 | `REGISTRATION` | `open` (default) lets anyone create an inbox. `invite` asks for a code when an inbox is created. `closed` refuses new inboxes. Existing inboxes keep working in every mode. |
 | `INVITE_CODE` | The code for `invite` mode. On Cloudflare set it with `npx wrangler secret put INVITE_CODE`. |
 
@@ -126,19 +132,23 @@ Limits are in `relay/src/core.js`; the ones clients need are reported at
 
 ### Running a public relay
 
-The relay protects itself where it can:
+The relay stays open to anyone without accounts, and protects itself like this:
 
-- a sender's share of an inbox is capped, and so is the relay's total storage;
-- a new inbox starts with a small quota and becomes established by collecting
-  on three different days; all new inboxes together can use only part of the
-  relay, so established users keep working when newcomers flood in;
-- new inboxes are limited per address and per hour, and ones that never
-  become established are removed after a week;
+- creating an inbox costs a little computing time (`POW_BITS`), so creating
+  thousands is expensive;
+- new inboxes are limited per address and per hour;
+- a sender's share of an inbox is capped;
+- when the relay is full it makes room instead of turning people away: the
+  inbox that holds the most loses its oldest ticket, and the inbox that has
+  gone unused the longest gives up its place. A printer whose inbox was
+  removed simply creates it again the next time it collects;
+- an inbox never collected from is removed after a week, any inbox after 30
+  unused days;
 - bad requests are refused before their body is read.
 
-An open relay can still be worn down by someone determined with many
-addresses. That is the price of letting anyone in without an account; the
-damage is delay, never disclosure, and anyone can run their own.
+Someone determined with many addresses can still wear an open relay down.
+That is the price of letting anyone in without an account. The damage is
+delay and lost tickets, never disclosure, and anyone can run their own relay.
 
 On Cloudflare, two more things are set up in `wrangler.toml`:
 
@@ -155,9 +165,10 @@ starting with `/v1`, for example 20 requests per 10 seconds per IP address.
 
 Be realistic about what this buys on a free plan: it stops accidents and
 casual abuse. Someone determined, using many addresses or staying just under
-the limit, can still use up a day's allowance. The damage is bounded: the
-relay answers with errors until the allowance resets at 00:00 UTC, and no
-ticket is lost or exposed.
+the limit, can still use up a day's allowance. The relay then answers with
+errors until the allowance resets at 00:00 UTC. Tickets already stored stay
+where they are; tickets people try to send meanwhile are refused, and nothing
+is ever exposed.
 
 On your own server, use your reverse proxy's rate limiting. Per-address
 counters that live for minutes are fine; request logs are not (see section 1.1
@@ -174,12 +185,12 @@ The conformance tests run against any relay:
 
 ## Security
 
-The spec, relay and reference client went through two independent adversarial
-reviews before the first clients were written, and the findings are folded
-into the current draft: pairing does not trust the relay and needs a real
-ticket, replay is bounded, cards are signed and strictly parsed, a card cannot
-point a client at a private address, and malformed input is discarded rather
-than fatal. Section 9 of the spec
+The spec, relay and reference client went through three independent
+adversarial reviews before the first clients were written, and the findings
+are folded into the current draft: pairing does not trust the relay, is never
+silent and is confirmed against a fingerprint; replay is bounded; cards are
+signed and strictly parsed; clients refuse relay names that resolve to
+private addresses; and malformed input is discarded rather than fatal. Section 9 of the spec
 lists what remains true by design (no forward secrecy, signatures are
 transferable proof, a card proves possession and nothing more).
 

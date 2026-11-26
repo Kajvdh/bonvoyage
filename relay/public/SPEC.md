@@ -70,12 +70,16 @@ A relay SHOULD NOT keep logs of IP addresses. Clients cannot verify this.
 - **base64url** means RFC 4648 section 5, without `=` padding. Encodings MUST
   be canonical: the unused trailing bits are zero. A value that does not
   re-encode to the same text MUST be rejected.
-- All JSON is UTF-8 without a byte order mark and MUST be valid RFC 8259 JSON
-  containing only valid Unicode (no unpaired surrogates). `NaN` and `Infinity`
+- All JSON is UTF-8 and MUST be valid RFC 8259 JSON containing only valid
+  Unicode (no unpaired surrogates). A byte order mark, `NaN` and `Infinity`
   are not JSON and MUST be rejected.
 - Unknown members MUST be ignored, so that later versions can add fields.
 - **Nesting.** Count an array or object as one level, plus one for each array
-  or object it sits inside. Receivers MUST reject JSON with a level above 16.
+  or object it sits inside. Receivers MUST reject JSON with a level above 16,
+  and MUST do so without first parsing it with a parser that can run out of
+  stack: either the parser enforces the limit itself, or the bytes are scanned
+  for bracket depth (outside strings) before they are parsed. Every JSON text
+  in this protocol is at most 61436 bytes.
 - **Duplicate member names.** Senders MUST NOT produce them. A receiver MAY
   reject a message that has them; one that does not MUST use the same parser
   for every decision about a message, so that it cannot verify one value and
@@ -94,18 +98,39 @@ A relay SHOULD NOT keep logs of IP addresses. Clients cannot verify this.
   ending with `-`; lower case only;
 - the last label consists of letters only, which rules out every way of
   writing an IP address;
-- at most 253 characters;
-- an optional `:port`, a decimal number from 1 to 65535 without leading
-  zeros. The default port 443 MUST NOT be written.
+- the name is at most 253 characters, not counting the port;
+- an optional `:port`, a decimal number from 1 to 65535 written with the
+  ASCII digits `0`-`9` and without leading zeros. The default port 443 MUST
+  NOT be written.
+
+A relay under a top-level domain that is not letters only (the `xn--`
+internationalised ones) cannot be named in version 1.
 
 Examples: `bonvoyage.kaj.dev`, `relay.example:8443`. Not hosts: `localhost`,
 `printer`, `192.168.1.10`, `2130706433`, `relay.example:443`, `Relay.Example`.
 
-Before connecting to a host, a client MUST resolve the name and MUST refuse
-to connect if any address it resolves to is not a public address: loopback,
-private (RFC 1918), link-local, carrier-grade NAT (100.64.0.0/10), unique
-local (fc00::/7), unspecified, multicast, or an IPv4-mapped form of these. It
-MUST connect to an address it checked, not resolve the name a second time.
+**Addresses.** A relay named in a card is chosen by someone else, so a client
+MUST NOT let it point at the client's own network. Before connecting to a
+host, a client MUST resolve the name and check every address it resolves to:
+
+- An IPv6 address that carries an IPv4 address inside it is judged by that
+  IPv4 address: IPv4-mapped (`::ffff:0:0/96`), IPv4-compatible (`::/96`),
+  IPv4-translated (`::ffff:0:0:0/96`), NAT64 (`64:ff9b::/96`,
+  `64:ff9b:1::/48`), 6to4 (`2002::/16`) and Teredo (`2001::/32`).
+- The address MUST be a globally reachable unicast address according to the
+  IANA special-purpose address registries for IPv4 and IPv6. This refuses,
+  among others: `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`,
+  `169.254.0.0/16`, `172.16.0.0/12`, `192.0.0.0/24`, `192.168.0.0/16`,
+  `198.18.0.0/15`, `224.0.0.0/3`; and `::`, `::1`, `fc00::/7`, `fe80::/10`,
+  `fec0::/10`, `ff00::/8`.
+- A client SHOULD also refuse an address inside a network it is directly
+  attached to, which matters on IPv6 networks where every device has a
+  public address.
+
+If any address fails, the client MUST NOT connect. It MUST connect to an
+address it checked, not resolve the name a second time. What remains possible
+is the opening of a TLS connection to a public address of the card issuer's
+choosing; nothing of a message is sent before the certificate is verified.
 
 ## 2. Cryptography
 
@@ -198,6 +223,13 @@ Someone who is given a card MUST, before using it:
 
 Parameters not in the table are ignored.
 
+A card is checked once, when it is taken in. The sender then keeps what it
+needs from it (address, encryption key, token and pairing secret) and uses
+that for every message; `e` is not looked at again. Because the issuer stops
+accepting a first message when the card expires (section 3.3), a sender
+SHOULD send a first ticket as soon as it has taken a card in, and SHOULD tell
+its user so.
+
 A card contains a drop token and a pairing secret and is therefore a
 **secret**: whoever holds it can pair with you in the other person's place.
 Hand it over privately. Printing it as a QR code on a ticket for the other
@@ -212,45 +244,85 @@ tickets in both directions, both people give each other a card.
 When you issue a card you store a **contact**: your own name for that person,
 the pairing secret, the token ID, when the card was issued, and when it
 expires for pairing. An issuer SHOULD let an unused card expire after about 7
-days and MUST refuse to pair with it afterwards, by its own clock, whether or
-not the card carries `e`.
+days, measured by its own clock, whether or not the card carries `e`.
+
+A contact is in one of three states:
+
+| State | Meaning |
+|---|---|
+| **open** | The card has been issued. No signing key belongs to the contact yet. |
+| **pending** | A signing key has claimed the card and is **pinned** to the contact. The owner has not confirmed it yet. Tickets from that key are held, not printed. |
+| **paired** | The owner confirmed. Tickets from the pinned key are printed. |
 
 Every message carries the pairing secret of the card it was sent with
-(section 5.1). It is inside the sealed part, so the relay never sees it. For
-each authentic message the recipient decides who it is from:
+(section 5.1), inside the sealed part, so the relay never sees it. For each
+authentic message the recipient decides who it is from:
 
-1. If the message's signing key is **pinned** to a contact, the message is
-   from that contact. The pairing secret in it is not looked at.
-2. Otherwise, if the pairing secret equals that of a contact that has no
-   pinned key and whose card has not expired, the sender is a **candidate**
-   for that contact.
+1. If the message's signing key is pinned to a contact, the message is from
+   that contact. The pairing secret in it is not looked at.
+2. Otherwise, if the pairing secret equals that of an **open** contact whose
+   card has not expired at the moment the message is handled, the sender is a
+   **candidate** for that contact.
 3. Otherwise the message is from nobody the recipient knows and MUST be
    discarded.
 
-A candidate becomes the contact, and its signing key is pinned, only through
-a message that is a valid ticket (type `ticket`, passing section 7) and that
-the recipient accepts. A recipient SHOULD ask its owner to confirm a new
-contact; until the owner does, the ticket is held and nothing is pinned. A
-message that does not lead to a pin leaves no trace of the candidate.
+The transitions:
+
+- **open to pending.** A candidate's message that is a valid ticket (type
+  `ticket`, passing section 7) pins the candidate's signing key to the
+  contact. Any other message from a candidate is discarded and changes
+  nothing.
+- **Notice.** On this transition the recipient MUST tell its owner, on
+  paper or on a screen the owner will see: a fixed text saying that a new
+  contact wants to pair, the recipient's own name for the contact, and the
+  fingerprint (section 3.4) of the pinned key. Pairing is therefore never
+  silent, even when the ticket itself is empty. The notice shows nothing the
+  sender chose, except that it MAY show `from_name` clearly marked as the
+  sender's own claim.
+- **pending to paired.** The owner confirms, ideally after comparing the
+  fingerprint with the other person. Held tickets are then printed.
+- **pending to removed.** The owner declines. The contact is removed, with
+  its held tickets. The right person then needs a new card.
+- A recipient MAY confirm automatically, going from open to paired at once.
+  It MUST still give the notice.
+- While a contact is pending, at most 5 of its tickets are held; further ones
+  are discarded. Held tickets count towards the contact's daily limit.
 
 Rules that keep this safe:
 
 - Pairing secrets MUST be compared in constant time.
 - A signing key MUST be pinned to at most one contact, and a contact has at
-  most one pinned key.
+  most one pinned key. Rule 1 is applied before rule 2, so a key that is
+  already pinned can never claim a second contact.
 - A message whose `created` is more than 600 seconds before its contact's
   card was issued MUST be discarded. This stops old messages from a sender
   who was removed and later paired again.
-- If a message arrives with the pairing secret of a contact that is pinned to
-  a different key, the recipient MUST discard it. It SHOULD tell its owner,
-  at most once a day per contact and never by printing: it means the card
-  reached someone else.
+- If a message from an unknown key carries the pairing secret of a contact
+  that is pending or paired, the recipient MUST discard it. It SHOULD tell
+  its owner that the card was used by a second party, at most once a day per
+  contact and never by printing. The warning does not say which of the two
+  is the intended person; comparing fingerprints does.
 - The token the relay reports for a message (section 6.5) is a hint only. It
   MUST NOT be used to decide who a message is from.
 
-**Removing a contact** means deleting it, pinned key included; its messages
-are then discarded at step 3. Revoking its drop token at the relay (section
-4) is good housekeeping but is not what blocks it.
+**Removing a contact** means deleting it: the pinned key, the pairing secret
+and any tickets of it that are held or queued. Its messages are then
+discarded by rule 3. Revoking its drop token at the relay (section 4) is good
+housekeeping but is not what blocks it.
+
+### 3.4 Fingerprints
+
+The **fingerprint** of a signing key lets two people check, over the phone or
+face to face, that a printer paired with the key they think it did. Take the
+first 5 bytes of
+
+```
+SHA-256("bonvoyage-v1-fingerprint\n" || the 32 bytes of the public signing key)
+```
+
+as a big-endian number, take it modulo 10^12, and write it as 12 decimal
+digits in three groups of four, for example `4821 0937 5512`. A client MUST
+be able to show the fingerprint of its own key.
 
 ## 4. Drop tokens
 
@@ -264,8 +336,9 @@ Removing a token ID from the inbox stops that card from delivering.
 
 An owner can replace a paired contact's token: it registers a new token for
 that contact and hands them a card carrying it. The contact's key stays
-pinned, so the pairing secret on the new card is never used. This breaks the
-relay's ability to link that contact's old and new messages.
+pinned, so the pairing secret on that card is never used; the owner MUST put
+a fresh random value there and not store it, so that it cannot pair anyone.
+This breaks the relay's ability to link that contact's old and new messages.
 
 ## 5. Messages
 
@@ -285,6 +358,10 @@ A message is a JSON object:
 | `expires` | integer | optional; the message is not printed once the time is later than this; same range |
 | `from_name` | string | optional; the sender's own display name, 1 to 40 characters |
 | `ticket` | object | the ticket (section 7), required for type `ticket` |
+
+A sender that tries again after a failed drop MUST send the same sealed
+message, or at least a message with the same `id`, so that a drop which did
+succeed the first time is not printed twice.
 
 ### 5.2 Signing
 
@@ -325,12 +402,15 @@ A recipient handles each collected message with the steps below, in this
 order, one message at a time. Two receive loops MUST NOT run at the same time
 on the same stored state.
 
-If any step fails, or if handling the message raises any error at all, the
-message is **discarded**: it MUST NOT be printed, it leaves no state behind
-other than what step 9 recorded, the recipient deletes it from the relay, and
-carries on with the next message. A failure to reach the relay (when
-collecting or deleting) is not a reason to discard anything; the recipient
-tries again later.
+A message that fails a step is **discarded**: it MUST NOT be printed, it
+leaves no state behind other than what the steps explicitly record, the
+recipient deletes it from the relay, and carries on with the next message. An
+error while handling a message that was caused by the message counts as a
+failed step.
+
+A failure of the recipient itself is different: no connection to the relay, a
+full disk, an error while writing its state. Then the recipient MUST stop
+without deleting the message, and try again later.
 
 Let `now` be the recipient's own clock.
 
@@ -342,41 +422,47 @@ Let `now` be the recipient's own clock.
    strings, `sig` of 64 bytes. Decode `msg` to the bytes `M`.
 4. **Verify.** Parse `M` as JSON; it MUST be an object, and `from` MUST be a
    valid address. Take the signing key from the inbox ID in `from` and verify
-   `sig` over `"bonvoyage-v1-message\n" || M`.
+   `sig` over `"bonvoyage-v1-message\n" || M`, the bytes exactly as decoded.
 5. **Validate.** Every member in the table of 5.1 MUST have exactly the stated
    type and format (`v` is the number 1, not `true` or `"1"`; `id` and `pair`
    are canonical base64url). The inbox ID in `to` MUST equal the recipient's
-   own; the host in `to` is not compared.
+   own, exactly; the host in `to` is not compared.
 6. **Check the time.** Discard if `created > now + 600`, if
    `created < now - 691200` (8 days), or if `expires` is present and
    `expires < now`.
-7. **Check for a repeat.** Discard if this signing key and `id` were handled
-   before. Recipients MUST remember them for at least 692000 seconds, counted
-   from when the message was received.
-8. **Find the contact** as described in section 3.3: a pinned contact, a
-   candidate, or discard.
-9. **Decide and record.** A message from a candidate that is not a valid
-   ticket is discarded here, with nothing recorded. Otherwise, in one step
-   that survives a restart, store: the signing key and `id` as handled; the
-   pin, if this message pairs a contact; and, for a ticket that will be
-   printed or held, the ticket itself in a queue. A crash after this step
-   must lose neither the record nor the ticket.
-10. **Act.** For type `ticket`: validate the ticket (section 7), apply the
-    recipient's policy (section 8), then print it, queue it, or drop it.
-    Messages of any other type are dropped without printing.
-11. **Delete** the message from the relay.
+7. **Check for a repeat.** Discard if this signing key together with this
+   `id` was handled before. Recipients MUST remember the pair for at least
+   692000 seconds, counted from when the message was received.
+8. **Find the contact** (section 3.3): a pinned contact, a candidate, or
+   discard.
+9. **Check the content.** For type `ticket`, validate the ticket (section 7).
+   A candidate whose message is not a valid ticket is discarded here, and
+   nothing about it is recorded.
+10. **Record.** In one step that survives a restart, store: the signing key
+    and `id` as handled; the pin and the new state, if this message moved a
+    contact from open to pending or paired; and, if it is a valid ticket, the
+    ticket in a queue. A crash after this step must lose neither the record
+    nor the ticket. A message from a pinned contact that is not a valid
+    ticket (an unknown type, or a ticket that fails section 7) is recorded as
+    handled and otherwise dropped.
+11. **Delete** the message from the relay. If that fails, the relay offers the
+    message again and step 7 discards it.
 
-Validating the ticket is part of deciding in step 9; it is listed under step
-10 only because that is where its outcome is used for a pinned contact.
-
-A recipient that holds a ticket for later (quiet hours, approval) SHOULD check
-`expires` again at the moment of printing.
+Printing happens from the queue, where the recipient's policy applies
+(section 8): quiet hours, the daily limit, holding tickets of a pending
+contact. A recipient SHOULD check `expires` again at the moment of printing.
 
 **Clocks.** These checks use the recipient's own clock, never a time supplied
-by a relay. A recipient can compare its clock with the `Date` header of a
-relay response; if they differ by more than 300 seconds it MUST NOT handle or
-delete messages until its clock is corrected, because it would discard valid
-messages as too old or from the future.
+by a relay, which could otherwise revive expired messages. But a recipient
+with a wrong clock would discard every valid message as too old or from the
+future, so:
+
+- A relay MUST send a `Date` header on every response.
+- Each time it collects, a recipient MUST compare its clock with that header.
+  If the header is missing or differs by more than 300 seconds, it MUST NOT
+  handle or delete any message until its clock is right.
+- A sender SHOULD make the same comparison before sending, because a message
+  with a wrong `created` is discarded without a trace.
 
 ## 6. Relay HTTP interface
 
@@ -410,9 +496,12 @@ seconds, and SHOULD NOT send headers that identify the client software or its
 owner. Sending a ticket MUST NOT block a client's receive loop, because the
 relay it sends to is chosen by someone else.
 
+A relay MUST send a `Date` header on every response (section 5.4).
+
 A relay MAY limit how many requests an IP address makes, and how many inboxes
 it creates, in a short period. Keeping counters for that purpose for at most
-an hour is not logging in the sense of section 1.1.
+a day, in a form from which the address cannot be read back, is not logging
+in the sense of section 1.1.
 
 ### 6.1 Relay information
 
@@ -420,14 +509,14 @@ an hour is not logging in the sense of section 1.1.
 
 ```json
 {"bonvoyage": 1, "max_message_bytes": 61488, "max_messages": 50,
- "max_messages_per_token": 10, "new_inbox_max_messages": 5,
- "retention_seconds": 604800, "max_tokens": 64, "poll_seconds": 300,
+ "max_messages_per_token": 10, "retention_seconds": 604800,
+ "max_tokens": 64, "poll_seconds": 300, "pow_bits": 20,
  "registration": "open"}
 ```
 
 `poll_seconds` is how long the relay asks clients to wait between collections
-(section 6.5); it is never less than 60. `new_inbox_max_messages` is the
-smaller quota of an inbox that is new (section 6.4). `registration` is `open`,
+(section 6.5); it is never less than 60. `pow_bits` is the proof of work a new
+inbox needs (section 6.3), from 0 (none) to 32. `registration` is `open`,
 `invite` (section 6.3) or `closed`.
 
 ### 6.2 Owner authentication
@@ -485,17 +574,36 @@ Replacing the list is how tokens are added and revoked. Response `200` with
 
 `DELETE /v1/inbox/<inbox ID>` removes the inbox and everything in it (`204`).
 
-Creating an inbox can be refused: `403` when registration is closed, the
-relay is full, or an invitation is required and missing or wrong; `429` when
-too many inboxes were created recently, by everyone or from the same address.
-On a relay with `registration: "invite"`, the client adds the header
+Creating an inbox can be refused: `403` when registration is closed, an
+invitation is required and missing or wrong, or the proof of work is missing
+or too small; `429` when too many inboxes were created recently, by everyone
+or from the same address; `503` when the relay has no room. On a relay with
+`registration: "invite"`, the client adds the header
 `Bonvoyage-Invite: <code>` when creating an inbox. Existing inboxes keep
 working in every mode.
 
-A relay MAY treat an inbox as new until its owner has collected from it on
-several different days, give new inboxes a smaller quota (section 6.4), and
-remove one that is still new 7 days after it was created. It MAY remove any
-inbox that has not been collected from for 180 days.
+**Proof of work.** A relay that reports `pow_bits` greater than 0 asks whoever
+creates an inbox to spend a little computing time first, so that creating
+thousands of inboxes is expensive while creating one costs a second or two.
+The client finds a `nonce`, a decimal number from 0 to 10^20 - 1 without
+leading zeros, such that
+
+```
+SHA-256("bonvoyage-v1-pow\n" || inbox ID || "\n" || nonce)
+```
+
+starts with at least `pow_bits` zero bits, and sends it as the header
+`Bonvoyage-Pow: <nonce>` on the `PUT` that creates the inbox. The simplest
+search tries 0, 1, 2 and so on. The work is tied to the inbox ID, so it
+cannot be reused for another inbox; it is not needed to update an inbox that
+exists.
+
+**Inboxes do not last forever.** A relay MAY remove an inbox that was never
+collected from after 7 days, any inbox that has not been collected from for
+30 days, and, when it is full, the inbox that has gone unused the longest. A
+client whose collect returns `404` MUST create its inbox again with its
+current token list, and carry on. Its contacts need nothing new: the address
+and the cards stay valid. Tickets sent while the inbox was gone are lost.
 
 ### 6.4 Dropping a message (sender)
 
@@ -511,11 +619,15 @@ The relay accepts it (`201`, body `{"id": "<relay message id>"}`) when:
 - the body length is `48 + n * 4096` for `n` from 1 to 15, otherwise `400`, or
   `413` when it is longer than `max_message_bytes`;
 - the inbox holds fewer than `max_messages` messages, and fewer than
-  `max_messages_per_token` that arrived with this token, otherwise `429`. For
-  a new inbox (section 6.3) both limits are `new_inbox_max_messages` when that
-  is smaller, and a relay MAY also limit how many messages all new inboxes
-  hold together (`429`);
-- the relay as a whole has room, otherwise `503`.
+  `max_messages_per_token` that arrived with this token, otherwise `429`.
+
+A relay that is full as a whole MAY make room by removing waiting messages,
+oldest first, from the inboxes that hold the most; or it answers `503`.
+
+**Delivery is not guaranteed.** A `201` means the relay stored the message,
+not that it will be printed: the relay may drop it when full or after
+`retention_seconds`, the inbox may be gone, and the recipient may discard it.
+There are no receipts in version 1.
 
 The relay MUST NOT reveal whether a `401` was caused by an unknown inbox or by
 an unknown token; both get the same response. A relay SHOULD check the
@@ -601,7 +713,7 @@ rendering and MUST discard the whole ticket if any is exceeded.
 | Limit | Value |
 |---|---|
 | Blocks in a ticket | 100 |
-| Characters in a ticket: the Unicode code points of every `text`, list item, `caption` and `alt` together | 8000 |
+| Characters in a ticket: the Unicode code points of every `text`, list item, `caption` and `alt` together, counted as received, before the cleaning of section 7.3 | 8000 |
 | Lines in a ticket: for each `text` block one plus its line feeds, for each `list` its number of items, for each `space` its lines, one per `divider` | 300 |
 | Items in one list | 50 |
 | `qr` blocks in a ticket | 4 |
@@ -651,15 +763,19 @@ length-delimited form, so that no byte of it can be read as a command.
 Every recipient, whether or not it can print images, MUST check each `image`
 block before accepting a ticket:
 
-- `png` is canonical base64url and decodes to data that starts with the PNG
-  signature followed by an `IHDR` chunk with a correct checksum;
-- the width and height in that header are at least 1 and within the limits of
-  section 7.2.
+- `png` is canonical base64url and decodes to data that starts with the
+  8-byte PNG signature, followed by a first chunk that is named `IHDR`, is
+  13 bytes long and has a correct checksum;
+- in that header the width and height are at least 1 and within the limits
+  of section 7.2; the colour type is 0 (greyscale); the bit depth is 1 or 8;
+  the interlace method is 0.
 
-A ticket with an image that fails these checks is invalid. A recipient that
-does render images MUST NOT decompress more than the declared size requires,
-and SHOULD ignore ancillary chunks and animation. Senders SHOULD use 1-bit or
-8-bit greyscale. A message leaves room for about 34 kB of PNG data in total.
+A ticket with an image that fails these checks is invalid. The restriction
+to plain greyscale keeps the memory a recipient needs small and predictable:
+at most 576 x 1200 bytes per image. A recipient that renders images MUST NOT
+decompress more than the declared size requires, and SHOULD ignore ancillary
+chunks and animation. A message leaves room for about 34 kB of PNG data in
+total.
 
 ### 7.5 What a recipient must never do
 
@@ -672,7 +788,8 @@ and SHOULD ignore ancillary chunks and animation. Senders SHOULD use 1-bit or
 Paper comes out in someone's home, so the recipient's rules always win. A
 recipient:
 
-- MUST discard messages from senders it has not paired with (section 3.3);
+- MUST discard messages from senders it has not paired with, and MUST tell
+  its owner whenever a contact is paired (section 3.3);
 - MUST limit how many tickets each contact can print in a day, with a limit of
   its own choosing; 10 is reasonable;
 - SHOULD respect its own quiet hours, holding tickets until they end;
@@ -698,14 +815,19 @@ recipient:
 - **A card that reaches the wrong person.** Whoever uses a card first is
   paired as that contact. Afterwards the intended person's messages are
   discarded, which the owner is told about (section 3.3), and the fix is to
-  remove the contact and issue a new card. Expiry and owner confirmation limit
-  the window. The warning depends on the intended person's message arriving,
-  so a relay working with the thief can suppress it. A card issued for one
+  remove the contact and issue a new card. Expiry limits the window, and the
+  pairing notice with its fingerprint (sections 3.3, 3.4) is what lets the
+  owner catch it. The separate warning about a second party depends on the
+  intended person's message arriving, so a relay working with the thief can
+  suppress it; the notice does not depend on the relay. A card issued for one
   person can also be handed on by them to someone else; a card proves
   possession of the card, not who holds it.
 - **Shared inbox.** Anyone holding a valid token can fill their own share of
   an inbox (`max_messages_per_token`) with messages that will be discarded.
   The owner sees which token and can revoke it.
+- **Delivery.** A relay may lose a message: when it is full, when the inbox
+  was removed, when it fails. A sender is not told. Version 1 accepts this; a
+  ticket is not a registered letter.
 - **No forward secrecy.** Whoever records sealed messages and later obtains
   the recipient's private encryption key can read them all, including who sent
   them. Keep that key safe; a printer that suspects its keys leaked creates a

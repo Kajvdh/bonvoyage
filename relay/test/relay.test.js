@@ -2,13 +2,14 @@
 //
 //   node --test test/                      in-process, against the Node storage
 //   RELAY_URL=http://localhost:8787 node --test test/     against any running relay
-//   RELAY_URL=https://relay.example RELAY_DELAY_MS=700 node --test --test-concurrency=1 test/
+//   RELAY_URL=https://relay.example RELAY_DELAY_MS=700 node --test test/
 //                                          the same, slowly, for a relay behind a rate limit
 //
 // Tests that need to move the clock or change settings only run in-process.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { b64url, createRelay, requestSigningInput, sha256hex } from "../src/core.js";
+import { b64url, createRelay, powBits, requestSigningInput, sha256hex } from "../src/core.js";
 
 const REMOTE = process.env.RELAY_URL;
 const BASE = REMOTE || "http://relay.test";
@@ -18,8 +19,7 @@ let clock = Math.floor(Date.now() / 1000);
 let relay;
 if (!REMOTE) {
   const { NodeStore } = await import("../src/store-node.js");
-  // In-process, every inbox counts as established; the tests for new inboxes build their own relay.
-  relay = createRelay(new NodeStore(":memory:"), { now: () => clock, maxNewInboxesPerHour: 1000, establishedAfterDays: 0 });
+  relay = createRelay(new NodeStore(":memory:"), { now: () => clock, maxNewInboxesPerHour: 1000 });
 }
 
 // RELAY_DELAY_MS spaces the requests out, for a relay that sits behind a rate limit.
@@ -31,11 +31,26 @@ async function send(request, target = relay) {
 }
 const url = (path) => BASE + path;
 const now = () => (REMOTE ? Math.floor(Date.now() / 1000) : clock);
+const INFO = await (await send(new Request(url("/v1")))).json();
 
-async function newIdentity() {
+/** Proof of work for a new inbox (SPEC 6.3): a nonce that gives `bits` leading zero bits. */
+function work(inboxId, bits) {
+  for (let nonce = 0; ; nonce++) {
+    const digest = createHash("sha256").update(`bonvoyage-v1-pow\n${inboxId}\n${nonce}`).digest();
+    let zeros = 0;
+    for (const byte of digest) {
+      if (byte === 0) { zeros += 8; continue; }
+      zeros += Math.clz32(byte) - 24;
+      break;
+    }
+    if (zeros >= bits) return String(nonce);
+  }
+}
+
+async function newIdentity(bits = INFO.pow_bits) {
   const keys = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
   const id = b64url(new Uint8Array(await crypto.subtle.exportKey("raw", keys.publicKey)));
-  return { id, privateKey: keys.privateKey };
+  return { id, privateKey: keys.privateKey, pow: bits > 0 ? work(id, bits) : null };
 }
 
 async function newToken() {
@@ -49,11 +64,9 @@ async function ownerRequest(identity, method, path, body, forge = {}) {
   const t = String(forge.time ?? now());
   const input = await requestSigningInput(method, forge.host ?? HOST, forge.signedPath ?? path, t, forge.signedBody ?? bytes);
   const sig = b64url(new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, identity.privateKey, input)));
-  return new Request(url(path + (forge.query ?? "")), {
-    method,
-    headers: { "bonvoyage-auth": forge.header ?? `t=${t},sig=${sig}`, ...(forge.headers ?? {}) },
-    body: body === undefined ? undefined : bytes,
-  });
+  const headers = { "bonvoyage-auth": forge.header ?? `t=${t},sig=${sig}`, ...(forge.headers ?? {}) };
+  if (method === "PUT" && identity.pow && !("bonvoyage-pow" in headers)) headers["bonvoyage-pow"] = identity.pow;
+  return new Request(url(path + (forge.query ?? "")), { method, headers, body: body === undefined ? undefined : bytes });
 }
 
 const owner = async (...args) => send(await ownerRequest(...args));
@@ -84,13 +97,15 @@ const tick = () => (REMOTE ? new Promise((r) => setTimeout(r, 1100)) : void (clo
 test("relay information", async () => {
   const res = await send(new Request(url("/v1")));
   assert.equal(res.status, 200);
+  assert.ok(Math.abs(Date.parse(res.headers.get("date")) / 1000 - Date.now() / 1000) < 120, "every response carries a Date header");
   const info = await res.json();
   assert.equal(info.bonvoyage, 1);
   assert.equal(info.max_message_bytes, 61488);
-  for (const key of ["max_messages", "max_messages_per_token", "new_inbox_max_messages", "retention_seconds", "max_tokens", "poll_seconds"]) {
+  for (const key of ["max_messages", "max_messages_per_token", "retention_seconds", "max_tokens", "poll_seconds", "pow_bits"]) {
     assert.equal(typeof info[key], "number", key);
   }
   assert.ok(info.poll_seconds >= 60, "relays never ask for faster polling than once a minute");
+  assert.ok(info.pow_bits >= 0 && info.pow_bits <= 32);
   assert.ok(["open", "invite", "closed"].includes(info.registration));
 });
 
@@ -106,6 +121,7 @@ test("create an inbox, drop, collect, delete", async () => {
 
   const collected = await owner(me, "GET", `/v1/inbox/${me.id}/messages`);
   assert.equal(collected.status, 200);
+  assert.ok(collected.headers.get("date"), "collect responses carry a Date header");
   const { messages } = await collected.json();
   assert.equal(messages.length, 2);
   assert.equal(messages[0].id, firstId, "oldest first");
@@ -127,7 +143,7 @@ test("create an inbox, drop, collect, delete", async () => {
 test("dropping needs a token the inbox accepts", async () => {
   const { me, tok } = await inboxWithToken();
   const stranger = await newToken();
-  const nobody = await newIdentity();
+  const nobody = await newIdentity(0);
   const refusals = [
     await drop(me.id, null, sealed()),
     await drop(me.id, stranger.token, sealed()),
@@ -151,7 +167,7 @@ test("only sealed-message sizes are accepted", async () => {
 
 test("owner requests must be signed by the inbox key, for this relay", async () => {
   const { me, tok } = await inboxWithToken();
-  const other = await newIdentity();
+  const other = await newIdentity(0);
   const path = `/v1/inbox/${me.id}/messages`;
   assert.equal((await send(new Request(url(path)))).status, 401, "no signature");
   assert.equal((await owner(other, "GET", path)).status, 401, "someone else's key");
@@ -171,9 +187,11 @@ test("owner requests must be signed by the inbox key, for this relay", async () 
 test("an inbox PUT or DELETE must be newer than the last accepted one", async () => {
   const me = await newIdentity();
   const first = await newToken();
-  const put = await ownerRequest(me, "PUT", `/v1/inbox/${me.id}`, { tokens: [first.id] });
+  // Times are pinned explicitly: against a real relay, seconds pass between one request and the next.
+  const t0 = now();
+  const put = await ownerRequest(me, "PUT", `/v1/inbox/${me.id}`, { tokens: [first.id] }, { time: t0 });
   const replay = put.clone();
-  const sameSecond = await ownerRequest(me, "PUT", `/v1/inbox/${me.id}`, { tokens: [] });
+  const sameSecond = await ownerRequest(me, "PUT", `/v1/inbox/${me.id}`, { tokens: [] }, { time: t0 });
   assert.equal((await send(put)).status, 200);
   assert.equal((await send(sameSecond)).status, 409, "a second request in the same second is refused; the owner signs again later");
   await tick();
@@ -185,10 +203,11 @@ test("an inbox PUT or DELETE must be newer than the last accepted one", async ()
   assert.equal((await drop(me.id, first.token, sealed())).status, 401);
 
   await tick();
-  const del = await ownerRequest(me, "DELETE", `/v1/inbox/${me.id}`);
+  const t1 = now();
+  const del = await ownerRequest(me, "DELETE", `/v1/inbox/${me.id}`, undefined, { time: t1 });
   const delReplay = del.clone();
   assert.equal((await send(del)).status, 204);
-  assert.equal((await owner(me, "PUT", `/v1/inbox/${me.id}`, { tokens: [] })).status, 409, "the deleted inbox remembers its last request time");
+  assert.equal((await owner(me, "PUT", `/v1/inbox/${me.id}`, { tokens: [] }, { time: t1 })).status, 409, "the deleted inbox remembers its last request time");
   await tick();
   assert.equal((await owner(me, "PUT", `/v1/inbox/${me.id}`, { tokens: [] })).status, 200, "recreated with a later time");
   assert.equal((await send(delReplay)).status, 409, "the old DELETE cannot remove the new inbox");
@@ -204,23 +223,20 @@ test("replacing the token list revokes tokens", async () => {
   assert.equal((await drop(me.id, tok.token, sealed())).status, 401, "old token no longer works");
   assert.equal((await drop(me.id, second.token, sealed())).status, 201);
   await tick();
-  for (const bad of [{ tokens: ["abc"] }, { tokens: "x" }, {}, { tokens: Array(65).fill("0".repeat(64)) }]) {
+  for (const bad of [{ tokens: ["abc"] }, { tokens: "x" }, {}, { tokens: Array(65).fill("0".repeat(64)) }, { tokens: [["0".repeat(64)]] }]) {
     assert.equal((await owner(me, "PUT", `/v1/inbox/${me.id}`, bad)).status, 400);
   }
 });
 
 test("each contact has its own share of the inbox", async () => {
-  const info = await (await send(new Request(url("/v1")))).json();
-  // Against a real relay the inbox is brand new, so the smaller new-inbox quota applies.
-  const share = REMOTE ? Math.min(info.max_messages_per_token, info.new_inbox_max_messages) : info.max_messages_per_token;
   const me = await newIdentity();
   const [kaj, jan] = [await newToken(), await newToken()];
   assert.equal((await owner(me, "PUT", `/v1/inbox/${me.id}`, { tokens: [kaj.id, jan.id] })).status, 200);
-  for (let i = 0; i < share; i++) assert.equal((await drop(me.id, kaj.token, sealed())).status, 201);
+  for (let i = 0; i < INFO.max_messages_per_token; i++) assert.equal((await drop(me.id, kaj.token, sealed())).status, 201);
   const full = await drop(me.id, kaj.token, sealed());
-  assert.equal(full.status, 429, "one token cannot hold more than its share");
+  assert.equal(full.status, 429, "one token cannot hold more than max_messages_per_token");
   assert.ok(Number(full.headers.get("retry-after")) > 0, "429 carries Retry-After");
-  if (!REMOTE) assert.equal((await drop(me.id, jan.token, sealed())).status, 201, "another contact still gets through");
+  assert.equal((await drop(me.id, jan.token, sealed())).status, 201, "another contact still gets through");
 });
 
 test("deleting an inbox removes its messages", async () => {
@@ -228,10 +244,10 @@ test("deleting an inbox removes its messages", async () => {
   await drop(me.id, tok.token, sealed());
   await tick();
   assert.equal((await owner(me, "DELETE", `/v1/inbox/${me.id}`)).status, 204);
-  assert.equal((await owner(me, "GET", `/v1/inbox/${me.id}/messages`)).status, 404);
+  assert.equal((await owner(me, "GET", `/v1/inbox/${me.id}/messages`)).status, 404, "collecting from a missing inbox says so");
   assert.equal((await drop(me.id, tok.token, sealed())).status, 401);
   await tick();
-  await owner(me, "PUT", `/v1/inbox/${me.id}`, { tokens: [tok.id] });
+  assert.equal((await owner(me, "PUT", `/v1/inbox/${me.id}`, { tokens: [tok.id] })).status, 200, "the owner can simply create it again");
   const fresh = await (await owner(me, "GET", `/v1/inbox/${me.id}/messages`)).json();
   assert.deepEqual(fresh.messages, [], "a recreated inbox starts empty");
 });
@@ -250,131 +266,147 @@ test("unknown paths, methods, query strings and non-canonical IDs", async () => 
   assert.equal((await owner(me, "GET", `/v1/inbox/${alias}/messages`)).status, 404, "an alias of the same key is not an inbox");
 });
 
-test("inbox quota, retention and cleanup", { skip: LOCAL }, async () => {
+test("a new inbox needs proof of work when the relay asks for it", { skip: LOCAL }, async () => {
   const { NodeStore } = await import("../src/store-node.js");
-  const small = createRelay(new NodeStore(":memory:"), { now: () => clock, maxMessages: 3, maxTotalMessages: 4, statsSeconds: 0, establishedAfterDays: 0 });
-  const mk = async () => {
-    const me = await newIdentity();
-    const tokens = [await newToken(), await newToken(), await newToken(), await newToken()];
-    assert.equal((await send(await ownerRequest(me, "PUT", `/v1/inbox/${me.id}`, { tokens: tokens.map((t) => t.id) }), small)).status, 200);
-    return { me, tokens };
-  };
-  const post = (id, token) => small.fetch(new Request(url(`/v1/inbox/${id}/messages`), { method: "POST", headers: { authorization: `Bearer ${token}` }, body: sealed() }));
-  const get = async (me) => small.fetch(await ownerRequest(me, "GET", `/v1/inbox/${me.id}/messages`));
-
-  const a = await mk();
-  for (let i = 0; i < 3; i++) assert.equal((await post(a.me.id, a.tokens[i].token)).status, 201);
-  assert.equal((await post(a.me.id, a.tokens[3].token)).status, 429, "inbox full at max_messages");
-  assert.equal((await (await get(a.me)).json()).messages.length, 3, "a collects, so it counts as a used inbox");
-  const b = await mk();
-  assert.equal((await post(b.me.id, b.tokens[0].token)).status, 201);
-  const relayFull = await post(b.me.id, b.tokens[1].token);
-  assert.equal(relayFull.status, 503, "the relay as a whole is full");
-  assert.ok(relayFull.headers.get("retry-after"));
-
-  clock += 7 * 24 * 3600 + 1; // everything above is now past retention
-  await small.cleanup();
-  assert.equal((await post(a.me.id, a.tokens[0].token)).status, 201, "expired messages no longer count");
-  assert.equal((await (await get(a.me)).json()).messages.length, 1, "expired messages are not delivered");
-
-  clock += 179 * 24 * 3600;
-  assert.equal((await get(a.me)).status, 200, "collecting keeps an inbox alive");
-  clock += 179 * 24 * 3600;
-  await small.cleanup();
-  assert.equal((await get(a.me)).status, 200, "still there, 358 days after it was created");
-  clock += 180 * 24 * 3600 + 1;
-  await small.cleanup();
-  assert.equal((await get(a.me)).status, 404, "an inbox unused for 180 days is removed");
-});
-
-test("registration modes and the new-inbox rate limit", { skip: LOCAL }, async () => {
-  const { NodeStore } = await import("../src/store-node.js");
-  const store = new NodeStore(":memory:");
-  const at = (options) => createRelay(store, { now: () => clock, ...options });
-  const put = async (identity, target, headers) =>
-    target.fetch(await ownerRequest(identity, "PUT", `/v1/inbox/${identity.id}`, { tokens: [] }, { headers }));
-
-  const existing = await newIdentity();
-  assert.equal((await put(existing, at({}))).status, 200);
+  const hard = createRelay(new NodeStore(":memory:"), { now: () => clock, powBits: 10 });
+  assert.equal((await (await hard.fetch(new Request(url("/v1")))).json()).pow_bits, 10);
+  const me = await newIdentity(0);
+  const put = async (headers) => (await hard.fetch(await ownerRequest(me, "PUT", `/v1/inbox/${me.id}`, { tokens: [] }, { headers }))).status;
+  assert.equal(await put({}), 403, "no proof of work");
+  let weak = 0;
+  while ((await powBits(me.id, String(weak))) >= 10) weak++;
+  assert.equal(await put({ "bonvoyage-pow": String(weak) }), 403, "not enough work");
+  const other = await newIdentity(0);
+  assert.equal(await put({ "bonvoyage-pow": work(other.id, 10) }), 403, "work done for another inbox does not count");
+  for (const malformed of ["", "01", "-1", "1e3", "x", "9".repeat(21)]) assert.equal(await put({ "bonvoyage-pow": malformed }), 403);
+  const nonce = work(me.id, 10);
+  assert.ok((await powBits(me.id, nonce)) >= 10);
+  assert.equal(await put({ "bonvoyage-pow": nonce }), 200);
   clock += 1;
-  assert.equal((await put(existing, at({ registration: "closed" }))).status, 200, "existing inbox can still be updated");
-  assert.equal((await put(await newIdentity(), at({ registration: "closed" }))).status, 403, "no new inboxes");
-
-  const invite = at({ registration: "invite", inviteCode: "kom-binnen" });
-  assert.equal((await (await invite.fetch(new Request(url("/v1")))).json()).registration, "invite");
-  assert.equal((await put(await newIdentity(), invite)).status, 403, "no invitation");
-  assert.equal((await put(await newIdentity(), invite, { "bonvoyage-invite": "fout" })).status, 403, "wrong invitation");
-  assert.equal((await put(await newIdentity(), invite, { "bonvoyage-invite": "kom-binnen" })).status, 200);
-
-  const limited = at({ maxNewInboxesPerHour: 3 }); // two exist already
-  assert.equal((await put(await newIdentity(), limited)).status, 200);
-  const refused = await put(await newIdentity(), limited);
-  assert.equal(refused.status, 429, "too many new inboxes in the last hour");
-  assert.ok(Number(refused.headers.get("retry-after")) > 0);
-  clock += 3601;
-  assert.equal((await put(await newIdentity(), limited)).status, 200, "allowed again an hour later");
-  assert.equal((await put(await newIdentity(), at({ maxInboxes: 4 }))).status, 403, "relay is full");
+  assert.equal(await put({}), 200, "an existing inbox is updated without doing the work again");
 });
 
-test("new inboxes start small and become established by collecting on different days", { skip: LOCAL }, async () => {
+test("retention, and making room when an inbox or the relay is full", { skip: LOCAL }, async () => {
   const { NodeStore } = await import("../src/store-node.js");
-  const fresh = createRelay(new NodeStore(":memory:"), { now: () => clock, statsSeconds: 0, maxNewInboxMessages: 7 });
+  const small = createRelay(new NodeStore(":memory:"), { now: () => clock, maxMessages: 3, maxTotalMessages: 5, maxInboxes: 3 });
   const make = async () => {
-    const me = await newIdentity();
-    const tokens = [];
-    for (let i = 0; i < 8; i++) tokens.push(await newToken());
-    assert.equal((await fresh.fetch(await ownerRequest(me, "PUT", `/v1/inbox/${me.id}`, { tokens: tokens.map((t) => t.id) }))).status, 200);
-    return { me, tokens };
+    const me = await newIdentity(0);
+    const tokens = [await newToken(), await newToken(), await newToken(), await newToken()];
+    const res = await small.fetch(await ownerRequest(me, "PUT", `/v1/inbox/${me.id}`, { tokens: tokens.map((t) => t.id) }));
+    return { me, tokens, status: res.status };
   };
-  const post = (who, i) => fresh.fetch(new Request(url(`/v1/inbox/${who.me.id}/messages`), { method: "POST", headers: { authorization: `Bearer ${who.tokens[i].token}` }, body: sealed() }));
-  const collect = async (who) => (await (await fresh.fetch(await ownerRequest(who.me, "GET", `/v1/inbox/${who.me.id}/messages`))).json()).messages;
-  const empty = async (who) => { for (const m of await collect(who)) await fresh.fetch(await ownerRequest(who.me, "DELETE", `/v1/inbox/${who.me.id}/messages/${m.id}`)); };
+  const post = (who, i) => small.fetch(new Request(url(`/v1/inbox/${who.me.id}/messages`), { method: "POST", headers: { authorization: `Bearer ${who.tokens[i].token}` }, body: sealed() }));
+  const get = async (who) => small.fetch(await ownerRequest(who.me, "GET", `/v1/inbox/${who.me.id}/messages`));
+  const waiting = async (who) => (await (await get(who)).json()).messages;
 
   const a = await make();
-  for (let i = 0; i < 5; i++) assert.equal((await post(a, i)).status, 201);
-  assert.equal((await post(a, 5)).status, 429, "a new inbox holds at most new_inbox_max_messages");
+  for (let i = 0; i < 3; i++) assert.equal((await post(a, i)).status, 201);
+  assert.equal((await post(a, 3)).status, 429, "one inbox holds at most max_messages");
+  const firstOfA = (await waiting(a))[0].id;
 
+  // The relay holds 5 messages in total. a has 3; b gets 2; a sixth message makes room at the fullest inbox.
   const b = await make();
   assert.equal((await post(b, 0)).status, 201);
   assert.equal((await post(b, 1)).status, 201);
-  const poolFull = await post(b, 2);
-  assert.equal(poolFull.status, 429, "all new inboxes together have a limited share of the relay");
-  assert.ok(Number(poolFull.headers.get("retry-after")) > 0);
+  assert.equal((await post(b, 2)).status, 201, "a full relay still accepts: it makes room instead of refusing");
+  assert.equal((await waiting(b)).length, 3);
+  const leftInA = await waiting(a);
+  assert.equal(leftInA.length, 2, "the inbox that held the most lost one");
+  assert.ok(!leftInA.some((m) => m.id === firstOfA), "namely its oldest");
 
-  // a collects on three different days and is then established: the larger quota applies and the pool no longer counts it.
-  await empty(a);
-  for (let day = 0; day < 3; day++) { await collect(a); clock += 86400; }
-  for (let i = 0; i < 8; i++) assert.equal((await post(a, i)).status, 201, "an established inbox has its full quota");
-  assert.equal((await post(b, 2)).status, 201, "and its messages no longer use up the room for new inboxes");
+  clock += 7 * 24 * 3600 + 1; // everything above is now past retention
+  assert.equal((await waiting(a)).length, 0, "expired messages are not delivered");
+  for (let i = 0; i < 3; i++) assert.equal((await post(a, i)).status, 201, "and no longer count");
 
-  // b never became established: it is removed 7 days after it was created; a stays.
-  clock += 5 * 86400;
-  await fresh.cleanup();
-  assert.equal((await fresh.fetch(await ownerRequest(b.me, "GET", `/v1/inbox/${b.me.id}/messages`))).status, 404);
-  assert.equal((await fresh.fetch(await ownerRequest(a.me, "GET", `/v1/inbox/${a.me.id}/messages`))).status, 200);
+  // Three inboxes fit. a and b were just used; c fills the relay. A fourth is refused while nobody has been idle for a day...
+  await get(b);
+  const c = await make();
+  assert.equal(c.status, 200);
+  assert.equal((await make()).status, 503, "full, and every inbox was used in the last day");
+  // ...and takes the place of the inbox unused the longest once one has been.
+  clock += 2 * 86400;
+  await get(a);
+  await get(c);
+  const d = await make();
+  assert.equal(d.status, 200, "a newcomer gets in");
+  assert.equal((await get(b)).status, 404, "b, unused the longest, made room");
+  assert.equal((await get(a)).status, 200);
+  clock += 1;
+  assert.equal((await small.fetch(await ownerRequest(b.me, "PUT", `/v1/inbox/${b.me.id}`, { tokens: [] }))).status, 503, "b cannot come back while the relay is full of active inboxes");
+
+  // Cleanup: an inbox never collected from goes after 7 days, any inbox after 30 unused days.
+  clock += 8 * 86400;
+  await get(a);
+  await small.cleanup();
+  assert.equal((await get(d)).status, 404, "never collected from: removed after 7 days");
+  assert.equal((await get(a)).status, 200);
+  clock += 31 * 86400;
+  await small.cleanup();
+  assert.equal((await get(a)).status, 404, "unused for 30 days: removed");
 });
 
-test("new inboxes are limited per address, and the relay can be told its own host", { skip: LOCAL }, async () => {
+test("registration modes and limits on new inboxes", { skip: LOCAL }, async () => {
   const { NodeStore } = await import("../src/store-node.js");
-  const strict = createRelay(new NodeStore(":memory:"), { now: () => clock, maxNewInboxesPerAddressPerHour: 2, host: HOST });
-  const create = async (address, forge) => {
-    const me = await newIdentity();
-    return (await strict.fetch(await ownerRequest(me, "PUT", `/v1/inbox/${me.id}`, { tokens: [] }, forge), address)).status;
-  };
-  assert.deepEqual([await create("203.0.113.9"), await create("203.0.113.9"), await create("203.0.113.9")], [200, 200, 429]);
-  assert.equal(await create("203.0.113.10"), 200, "another address is not affected");
-  const v6 = ["2001:db8:1:2::1", "2001:db8:1:2:aaaa:bbbb:cccc:dddd", "2001:db8:1:2::3"];
-  assert.deepEqual([await create(v6[0]), await create(v6[1]), await create(v6[2])], [200, 200, 429], "an IPv6 /64 counts as one address");
-  assert.equal(await create("2001:db8:1:3::1"), 200);
-  clock += 3600;
-  assert.equal(await create("203.0.113.9"), 200, "allowed again in the next hour");
+  const store = new NodeStore(":memory:");
+  const at = (options) => createRelay(store, { now: () => clock, ...options });
+  const put = async (identity, target, headers, address) =>
+    target.fetch(await ownerRequest(identity, "PUT", `/v1/inbox/${identity.id}`, { tokens: [] }, { headers }), address);
+  const create = async (target, address) => (await put(await newIdentity(0), target, undefined, address)).status;
 
-  // A request addressed to this relay under another name is refused even though it is correctly signed for that name.
-  const me = await newIdentity();
-  const elsewhere = new Request(`http://evil.example/v1/inbox/${me.id}`, { method: "PUT", body: "{}" });
-  const forged = await ownerRequest(me, "PUT", `/v1/inbox/${me.id}`, { tokens: [] }, { host: "evil.example" });
-  const moved = new Request(elsewhere.url, { method: "PUT", headers: forged.headers, body: await forged.arrayBuffer() });
-  assert.equal((await strict.fetch(moved)).status, 401);
+  const existing = await newIdentity(0);
+  assert.equal((await put(existing, at({}))).status, 200);
+  clock += 1;
+  assert.equal((await put(existing, at({ registration: "closed" }))).status, 200, "existing inbox can still be updated");
+  assert.equal(await create(at({ registration: "closed" })), 403, "no new inboxes");
+
+  const invite = at({ registration: "invite", inviteCode: "kom-binnen" });
+  assert.equal((await (await invite.fetch(new Request(url("/v1")))).json()).registration, "invite");
+  assert.equal(await create(invite), 403, "no invitation");
+  assert.equal((await put(await newIdentity(0), invite, { "bonvoyage-invite": "fout" })).status, 403, "wrong invitation");
+  assert.equal((await put(await newIdentity(0), invite, { "bonvoyage-invite": "kom-binnen" })).status, 200);
+
+  const perAddress = at({ maxNewInboxesPerAddressPerHour: 2 });
+  assert.deepEqual([await create(perAddress, "203.0.113.9"), await create(perAddress, "203.0.113.9"), await create(perAddress, "203.0.113.9")], [200, 200, 429]);
+  assert.equal(await create(perAddress, "203.0.113.10"), 200, "another address is not affected");
+  const v6 = ["2001:db8:1:2::1", "2001:db8:1:2:aaaa:bbbb:cccc:dddd", "2001:db8:1:2::3"];
+  assert.deepEqual([await create(perAddress, v6[0]), await create(perAddress, v6[1]), await create(perAddress, v6[2])], [200, 200, 429], "an IPv6 /64 counts as one address");
+  assert.equal(await create(perAddress, "2001:db8:1:3::1"), 200);
+
+  const hourly = at({ maxNewInboxesPerHour: 9 }); // eight exist by now
+  assert.equal(await create(hourly), 200);
+  const refused = await put(await newIdentity(0), hourly);
+  assert.equal(refused.status, 429, "too many new inboxes in the last hour");
+  assert.ok(Number(refused.headers.get("retry-after")) > 0);
+  clock += 3601;
+  assert.equal(await create(hourly), 200, "allowed again an hour later");
+  assert.equal(await create(perAddress, "203.0.113.9"), 200, "and per address too");
+});
+
+test("the relay signs nothing for another host, and uses its own name when it is set", { skip: LOCAL }, async () => {
+  const { NodeStore } = await import("../src/store-node.js");
+  const named = createRelay(new NodeStore(":memory:"), { now: () => clock, host: "relay.example:8443" });
+  const me = await newIdentity(0);
+  const viaProxy = async (signedFor) => {
+    const signed = await ownerRequest(me, "PUT", `/v1/inbox/${me.id}`, { tokens: [] }, { host: signedFor });
+    // The request arrives with whatever Host the proxy passed on; only the configured name counts.
+    return (await named.fetch(new Request(`http://10.0.0.5:8787/v1/inbox/${me.id}`, { method: "PUT", headers: signed.headers, body: await signed.arrayBuffer() }))).status;
+  };
+  assert.equal(await viaProxy("10.0.0.5:8787"), 401, "signed for the name in the Host header: refused");
+  assert.equal(await viaProxy("other-relay.example"), 401, "signed for another relay: refused");
+  assert.equal(await viaProxy("relay.example:8443"), 200, "signed for the relay's own name: accepted");
+});
+
+test("two requests racing to change an inbox cannot both win", { skip: LOCAL }, async () => {
+  const { NodeStore } = await import("../src/store-node.js");
+  const store = new NodeStore(":memory:");
+  assert.equal(await store.putInbox("x", ["a"], 100, 100), "created");
+  assert.equal(await store.putInbox("x", [], 106, 106), "updated");
+  assert.equal(await store.putInbox("x", ["a"], 107, 101), "stale", "the write itself refuses an older time, whatever was checked before");
+  assert.deepEqual((await store.getInbox("x")).tokens, []);
+  assert.equal(await store.deleteInbox("x", 105, 108), false, "so does the delete");
+  assert.equal(await store.deleteInbox("x", 110, 110), true);
+  assert.equal(await store.putInbox("x", [], 111, 110), "stale", "and a deleted inbox keeps its last time");
+  assert.equal(await store.putInbox("x", [], 112, 111), "created");
 });
 
 test("a body is refused before it is read when it is too large or unauthorised", { skip: LOCAL }, async () => {

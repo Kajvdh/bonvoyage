@@ -8,6 +8,8 @@ compatibility_date = "2025-09-01"
 enabled = false
 
 [vars]
+POW_BITS = "20" # work a client must do once to create an inbox (SPEC 6.3); "0" switches it off
+# COUNTER_SALT: set a random value with `npx wrangler secret put COUNTER_SALT`
 # RELAY_HOST = "relay.example" # optional here: Cloudflare only routes your own host names to the Worker
 REGISTRATION = "open" # "invite" asks new inboxes for INVITE_CODE (set it with `wrangler secret put INVITE_CODE`); "closed" refuses them
 
@@ -28,7 +30,7 @@ run_worker_first = ["/v1", "/v1/*"]
 not_found_handling = "404-page"
 
 # At most this many relay requests per IP address per minute, per Cloudflare location.
-# A printer polling every 30 seconds makes 2. namespace_id is any integer unique in your account.
+# A printer collecting every 5 minutes makes one request in that time. namespace_id is any integer unique in your account.
 [[ratelimits]]
 name = "LIMITER"
 namespace_id = "7341"
@@ -37,9 +39,9 @@ namespace_id = "7341"
   limit = 180
   period = 60
 
-# Daily cleanup of expired messages and long-unused inboxes.
+# Hourly cleanup of expired messages, unused inboxes and short-lived counters.
 [triggers]
-crons = ["17 3 * * *"]
+crons = ["17 * * * *"]
 
 # Serve it on your own domain (the zone must be in the same Cloudflare account):
 # [[routes]]
