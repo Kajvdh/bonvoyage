@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bonvoyage playground</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧾</text></svg>">
+<style>
+  :root { --paper:#f5f2ea; --card:#fffdf8; --ink:#1c1b18; --soft:#5f5b52; --line:#ddd7c9; --accent:#d9480f; --ok:#2b8a3e;
+    --mono: ui-monospace, "SF Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace; }
+  @media (prefers-color-scheme: dark) { :root { --paper:#151410; --card:#1e1d18; --ink:#ece8dd; --soft:#a7a294; --line:#34322b; --accent:#ff7a3d; --ok:#69db7c; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--paper); color:var(--ink); font:15px/1.5 system-ui, sans-serif; }
+  header { display:flex; gap:16px; align-items:center; flex-wrap:wrap; padding:16px 22px; border-bottom:1px solid var(--line); }
+  header h1 { font:700 17px var(--mono); letter-spacing:.12em; margin:0; }
+  header h1 b { color:var(--accent); }
+  header p { margin:0; color:var(--soft); font-size:14px; flex:1 1 300px; }
+  form.new { display:flex; gap:8px; flex-wrap:wrap; }
+  input, textarea, select, button { font:inherit; color:var(--ink); background:var(--card); border:1px solid var(--line); border-radius:8px; padding:7px 10px; }
+  textarea { width:100%; min-height:70px; resize:vertical; font:13px/1.4 var(--mono); }
+  button { cursor:pointer; font-weight:600; }
+  button:hover { border-color:var(--accent); }
+  button.go { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  button.small { padding:3px 8px; font-size:13px; font-weight:500; }
+  main { display:flex; gap:18px; padding:20px 22px 60px; overflow-x:auto; align-items:flex-start; }
+  .printer { flex:0 0 400px; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; }
+  .printer h2 { margin:0; font-size:19px; display:flex; align-items:center; gap:8px; }
+  .printer h2 span { flex:1; }
+  .meta { font:12px/1.5 var(--mono); color:var(--soft); margin:4px 0 12px; word-break:break-all; }
+  .meta b { color:var(--ink); font-weight:600; }
+  h3 { font:600 11.5px var(--mono); letter-spacing:.14em; text-transform:uppercase; color:var(--soft); margin:18px 0 6px; }
+  .row { display:flex; gap:6px; margin:6px 0; flex-wrap:wrap; align-items:center; }
+  .row input, .row select { flex:1; min-width:0; }
+  ul { list-style:none; margin:0; padding:0; }
+  li.contact { display:flex; gap:6px; align-items:center; padding:5px 0; border-top:1px solid var(--line); font-size:14px; flex-wrap:wrap; }
+  li.contact .n { flex:1; }
+  .state { font:600 11px var(--mono); padding:2px 7px; border-radius:20px; border:1px solid var(--line); }
+  .state.pending { border-color:var(--accent); color:var(--accent); } .state.paired { border-color:var(--ok); color:var(--ok); }
+  .fp { font:12px var(--mono); color:var(--soft); flex-basis:100%; }
+  .cardbox { margin-top:8px; padding:8px; border:1px dashed var(--accent); border-radius:8px; font:11.5px/1.4 var(--mono); word-break:break-all; }
+  .roll { background:#fffef9; color:#1c1b18; font:12.5px/1.35 var(--mono); padding:4px 12px 14px; max-height:520px; overflow-y:auto; border-radius:4px; box-shadow:inset 0 0 0 1px #e6e0d2; }
+  .slip { border-bottom:1.5px dashed #b9b2a2; padding:10px 0; white-space:pre-wrap; word-break:break-word; }
+  .slip .t { font-weight:800; text-align:center; letter-spacing:.06em; }
+  .slip.notice .t { background:#1c1b18; color:#fffef9; }
+  .slip .when { text-align:center; opacity:.55; font-size:11px; margin-top:4px; }
+  .empty { color:#999; text-align:center; padding:22px 0; font-family:system-ui; }
+  #msg { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); background:var(--ink); color:var(--paper); padding:10px 16px; border-radius:10px; font-size:14px; max-width:90vw; display:none; z-index:5; }
+  #msg.bad { background:#c92a2a; color:#fff; }
+  .hint { color:var(--soft); font-size:13px; margin:2px 0 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>BON<b>VOYAGE</b> playground</h1>
+  <p>Virtual ticket printers. Each one is a real Bonvoyage identity on a relay, so they can pair with each other and with a real client.</p>
+  <form class="new" id="new">
+    <input id="newName" placeholder="Name, e.g. Stijn" maxlength="40" required>
+    <input id="newRelay" placeholder="relay" size="18">
+    <button class="go">Add virtual printer</button>
+  </form>
+</header>
+<main id="main"></main>
+<div id="msg"></div>
+<script>
+const $ = (sel, root = document) => root.querySelector(sel);
+const el = (tag, props = {}, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids); return n; };
+let cards = {};  // printer id -> last issued card, shown until the page reloads
+
+function say(text, bad) { const m = $("#msg"); m.textContent = text; m.className = bad ? "bad" : ""; m.style.display = "block"; clearTimeout(say.t); say.t = setTimeout(() => m.style.display = "none", bad ? 7000 : 3000); }
+
+async function api(path, body, method) {
+  const res = await fetch("/api" + path, { method: method || (body ? "POST" : "GET"), headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+async function run(button, work, done) {
+  if (button) button.disabled = true;
+  try { const out = await work(); if (done) say(done); await refresh(); return out; }
+  catch (e) { say(e.message, true); }
+  finally { if (button) button.disabled = false; }
+}
+
+function printerCard(p) {
+  const box = el("div", { className: "printer" });
+  const act = (action, body) => api(`/printers/${p.id}/${action}`, body || {});
+  const del = el("button", { className: "small", textContent: "remove", title: "Delete this virtual printer and its keys" });
+  del.onclick = () => confirm(`Remove ${p.name}? Its keys are deleted.`) && run(del, () => api(`/printers/${p.id}`, null, "DELETE"));
+  box.append(el("h2", {}, el("span", { textContent: "🖨 " + p.name }), del));
+  box.append(el("div", { className: "meta", innerHTML: `fingerprint <b>${p.fingerprint}</b><br>${p.address}` }));
+
+  // contacts: who may send to this printer
+  box.append(el("h3", { textContent: "Who may send to " + p.name }));
+  const contacts = el("ul");
+  for (const c of p.contacts) {
+    const li = el("li", { className: "contact" }, el("span", { className: "n", textContent: c.name }), el("span", { className: "state " + c.state, textContent: c.state + (c.held ? ` · ${c.held} held` : "") }));
+    if (c.state === "pending") {
+      const ok = el("button", { className: "small", textContent: "confirm" }); ok.onclick = () => run(ok, () => act("confirm", { contact: c.name }), `${c.name} confirmed`);
+      li.append(ok);
+    }
+    const no = el("button", { className: "small", textContent: c.state === "pending" ? "decline" : "remove" }); no.onclick = () => run(no, () => act("decline", { contact: c.name }), `${c.name} removed`);
+    li.append(no);
+    if (c.fingerprint) li.append(el("span", { className: "fp", textContent: "their fingerprint: " + c.fingerprint }));
+    contacts.append(li);
+  }
+  box.append(contacts);
+  const cardName = el("input", { placeholder: "Issue a card for…", maxLength: 40 });
+  const cardBtn = el("button", { textContent: "Issue card" });
+  cardBtn.onclick = () => run(cardBtn, async () => { const out = await act("card", { contact: cardName.value }); cards[p.id] = { for: cardName.value, uri: out.card }; }, "Card issued");
+  box.append(el("div", { className: "row" }, cardName, cardBtn));
+  if (cards[p.id]) {
+    const copy = el("button", { className: "small", textContent: "copy" });
+    copy.onclick = () => navigator.clipboard.writeText(cards[p.id].uri).then(() => say("Card copied"));
+    box.append(el("div", { className: "cardbox" }, el("b", { textContent: `Card for ${cards[p.id].for}: ` }), copy, el("div", { textContent: cards[p.id].uri })));
+  }
+
+  // recipients: whose cards this printer holds
+  box.append(el("h3", { textContent: p.name + " can send to" }));
+  box.append(el("div", { className: "hint", textContent: p.recipients.length ? p.recipients.join(", ") : "nobody yet: paste a card someone issued" }));
+  const addName = el("input", { placeholder: "Call them…", maxLength: 40, style: "flex:0 0 110px" });
+  const addCard = el("input", { placeholder: "bonvoyage://…  (their card)" });
+  const addBtn = el("button", { textContent: "Add" });
+  addBtn.onclick = () => run(addBtn, () => act("add", { name: addName.value, card: addCard.value }), "Card added");
+  box.append(el("div", { className: "row" }, addName, addCard, addBtn));
+  if (p.recipients.length) {
+    const to = el("select", {}, ...p.recipients.map(r => el("option", { textContent: r })));
+    const text = el("textarea", { placeholder: "A ticket. Lines starting with - become a tick list. Or paste a raw ticket as JSON." });
+    const sendBtn = el("button", { className: "go", textContent: "Send ticket" });
+    sendBtn.onclick = () => run(sendBtn, () => act("send", { to: to.value, text: text.value }), "Dropped at their relay");
+    box.append(el("div", { className: "row" }, to, sendBtn), text);
+  }
+
+  // paper
+  const collect = el("button", { className: "go", textContent: p.collect_in ? `Collect (in ${p.collect_in}s)` : "Collect now", disabled: p.collect_in > 0 });
+  collect.onclick = () => run(collect, () => act("collect"), "Collected");
+  const clear = el("button", { className: "small", textContent: "tear off" }); clear.onclick = () => run(clear, () => act("clear"));
+  box.append(el("h3", { textContent: "Paper" }), el("div", { className: "row" }, collect, clear));
+  const roll = el("div", { className: "roll" });
+  if (!p.paper.length) roll.append(el("div", { className: "empty", textContent: "nothing printed yet" }));
+  for (const s of p.paper) roll.append(el("div", { className: "slip " + s.kind }, el("div", { className: "t", textContent: " " + s.title + " " }), el("div", { textContent: s.body }), el("div", { className: "when", textContent: new Date(s.at * 1000).toLocaleTimeString() })));
+  box.append(roll);
+  return box;
+}
+
+async function refresh() {
+  const active = document.activeElement;
+  if (active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName) && active.closest("main") && active.value) return;  // do not wipe what is being typed
+  const data = await api("/printers");
+  $("#newRelay").placeholder = data.default_relay;
+  const main = $("#main");
+  main.replaceChildren(...data.printers.map(printerCard));
+  if (!data.printers.length) main.append(el("p", { className: "hint", style: "padding:30px", textContent: "No virtual printers yet. Add two, issue a card on one, paste it into the other, and send a ticket." }));
+}
+
+$("#new").onsubmit = (e) => { e.preventDefault(); const b = e.submitter; run(b, () => api("/printers", { name: $("#newName").value, relay: $("#newRelay").value }), "Printer created").then(() => { $("#newName").value = ""; }); };
+refresh();
+setInterval(() => refresh().catch(() => {}), 5000);
+</script>
+</body>
+</html>

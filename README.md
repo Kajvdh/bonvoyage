@@ -51,6 +51,7 @@ cards. The `.json` files hold private keys; keep them to yourself.
 | [`vectors/`](vectors/) | Test vectors, with a guide: keys, a signed and sealed message, a signed relay request, and messages that must be rejected. |
 | [`relay/`](relay/) | The relay. One codebase that runs on Cloudflare Workers (free plan) or on your own server. |
 | [`examples/bonvoyage.py`](examples/bonvoyage.py) | A reference client in one file, meant to be read next to the spec. |
+| [`playground/`](playground/) | Virtual ticket printers in your browser: try pairing and sending without hardware, or test a client you are building. |
 | [`relay/site/`](relay/site/) | The landing page a relay serves at `/`, with the rendered spec at `/spec/`. Rebuild with `npm run build:site`. |
 
 ## Implementing a client
