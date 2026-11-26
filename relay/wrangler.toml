@@ -21,6 +21,16 @@ migrations_dir = "migrations"
 [assets]
 directory = "./public"
 
+# At most this many relay requests per IP address per minute, per Cloudflare location.
+# A printer polling every 30 seconds makes 2. namespace_id is any integer unique in your account.
+[[ratelimits]]
+name = "LIMITER"
+namespace_id = "7341"
+
+  [ratelimits.simple]
+  limit = 180
+  period = 60
+
 # Daily cleanup of expired messages and long-unused inboxes.
 [triggers]
 crons = ["17 3 * * *"]

@@ -125,11 +125,16 @@ The relay protects itself where it can: a sender's share of an inbox is
 capped, the relay's total storage is capped, new inboxes are limited per hour,
 unused inboxes expire, and bad requests are refused before their body is read.
 
-What it cannot do from inside is stop someone from simply sending a very
-large number of requests. Put a rate limit in front of it: on Cloudflare, a
-rate limiting rule for the relay's host name (the free plan includes one); on
-your own server, your reverse proxy's rate limiting. Per-address counters that
-live for minutes are fine; request logs are not (see section 1.1 of the spec).
+On Cloudflare the Worker also limits each IP address to 180 relay requests a
+minute (the `[[ratelimits]]` block in `wrangler.toml`). That keeps one client
+from loading the database, but every request still counts towards your plan's
+daily allowance, because the limit runs inside the Worker. To stop a flood
+before it reaches the Worker, add a rate limiting rule for the relay's host
+name under Security in the Cloudflare dashboard (the free plan includes one).
+
+On your own server, use your reverse proxy's rate limiting. Per-address
+counters that live for minutes are fine; request logs are not (see section 1.1
+of the spec).
 
 ### Checking a relay
 
