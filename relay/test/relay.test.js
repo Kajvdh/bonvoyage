@@ -78,7 +78,7 @@ test("relay information", async () => {
   const info = await res.json();
   assert.equal(info.bonvoyage, 1);
   assert.equal(info.max_message_bytes, 61488);
-  for (const key of ["max_messages", "max_messages_per_token", "retention_seconds", "max_tokens"]) {
+  for (const key of ["max_messages", "max_messages_per_token", "retention_seconds", "max_tokens", "poll_seconds"]) {
     assert.equal(typeof info[key], "number", key);
   }
   assert.ok(["open", "invite", "closed"].includes(info.registration));
@@ -258,6 +258,11 @@ test("inbox quota, retention and cleanup", { skip: LOCAL }, async () => {
   // b never collected and is more than 7 days old: removed. a has collected: kept.
   assert.equal((await get(b.me)).status, 404, "an inbox that was never collected from is removed after 7 days");
   assert.equal((await get(a.me)).status, 200);
+  clock += 179 * 24 * 3600;
+  assert.equal((await get(a.me)).status, 200, "collecting keeps an inbox alive");
+  clock += 179 * 24 * 3600;
+  await small.cleanup();
+  assert.equal((await get(a.me)).status, 200, "still there, 358 days after it was created");
   clock += 180 * 24 * 3600 + 1;
   await small.cleanup();
   assert.equal((await get(a.me)).status, 404, "an inbox unused for 180 days is removed");

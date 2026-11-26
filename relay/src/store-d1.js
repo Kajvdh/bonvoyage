@@ -5,8 +5,8 @@ export class D1Store {
   }
 
   async getInbox(id) {
-    const row = await this.db.prepare("SELECT tokens FROM inboxes WHERE id = ?").bind(id).first();
-    return row ? { tokens: JSON.parse(row.tokens) } : null;
+    const row = await this.db.prepare("SELECT tokens, last_collected FROM inboxes WHERE id = ?").bind(id).first();
+    return row ? { tokens: JSON.parse(row.tokens), lastCollected: row.last_collected } : null;
   }
 
   async countInboxes() {

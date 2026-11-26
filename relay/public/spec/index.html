@@ -542,9 +542,10 @@ sense of section 1.1.</p>
 <p><code>GET /v1</code> returns the relay&#39;s limits:</p>
 <pre><code class="language-json">{&quot;bonvoyage&quot;: 1, &quot;max_message_bytes&quot;: 61488, &quot;max_messages&quot;: 50,
  &quot;max_messages_per_token&quot;: 10, &quot;retention_seconds&quot;: 604800,
- &quot;max_tokens&quot;: 64, &quot;registration&quot;: &quot;open&quot;}
+ &quot;max_tokens&quot;: 64, &quot;poll_seconds&quot;: 60, &quot;registration&quot;: &quot;open&quot;}
 </code></pre>
-<p><code>registration</code> is <code>open</code>, <code>invite</code> (section 6.3) or <code>closed</code>.</p>
+<p><code>poll_seconds</code> is how long the relay asks clients to wait between collections
+(section 6.5). <code>registration</code> is <code>open</code>, <code>invite</code> (section 6.3) or <code>closed</code>.</p>
 <h3 id="6-2-owner-authentication">6.2 Owner authentication</h3>
 <p>Requests marked <strong>owner</strong> are signed with the inbox&#39;s signing key. The client
 sends the header</p>
@@ -619,7 +620,10 @@ handling it. A message that is never deleted is removed by the relay after
 the relay and is not proof of anything (section 3.3), but it is useful for
 revoking a token that delivers messages which keep being discarded, which a
 recipient SHOULD do.</p>
-<p>Clients SHOULD poll no more often than once every 30 seconds.</p>
+<p>Clients SHOULD wait at least the relay&#39;s <code>poll_seconds</code> between collections,
+and MUST NOT collect more often than once every 30 seconds. A relay&#39;s capacity
+is mostly spent on polling, so a client that can live with a slower rhythm
+(every five minutes is plenty for most homes) should use it.</p>
 <h2 id="7-tickets">7. Tickets</h2>
 <p>A ticket describes content, not printer commands. Every recipient renders it
 in its own way, for its own paper width.</p>

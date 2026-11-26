@@ -24,6 +24,8 @@ export const DEFAULTS = {
   inactiveSeconds: 180 * 24 * 3600,
   clockSkewSeconds: 300,
   collectBatch: 20,
+  pollSeconds: 60,                 // how long clients should wait between collections
+  touchSeconds: 6 * 3600,          // an inbox's "last collected" time is only rewritten this often
   registration: "open",            // "open" | "invite" | "closed"
   inviteCode: "",                  // required for new inboxes when registration is "invite"
   now: () => Math.floor(Date.now() / 1000),
@@ -105,6 +107,7 @@ export function createRelay(store, options = {}) {
     max_messages_per_token: cfg.maxMessagesPerToken,
     retention_seconds: cfg.retentionSeconds,
     max_tokens: cfg.maxTokens,
+    poll_seconds: cfg.pollSeconds,
     registration: cfg.registration,
   });
 
@@ -203,11 +206,18 @@ export function createRelay(store, options = {}) {
 
   async function collect(request, ctx) {
     if (!(await ownerSignature(request, ctx, EMPTY))) return fail(401, "not authorised");
-    if (!(await store.getInbox(ctx.id))) return fail(404, "no such inbox");
+    const inbox = await store.getInbox(ctx.id);
+    if (!inbox) return fail(404, "no such inbox");
     const now = cfg.now();
-    await store.purgeMessages(now - cfg.retentionSeconds, ctx.id);
-    await store.markCollected(ctx.id, now);
-    return json(200, { messages: await store.listMessages(ctx.id, cfg.collectBatch) });
+    // A poll with nothing waiting costs two reads and no write: polling is by far the most common request.
+    if (!inbox.lastCollected || now - inbox.lastCollected >= cfg.touchSeconds) await store.markCollected(ctx.id, now);
+    const messages = await store.listMessages(ctx.id, cfg.collectBatch);
+    const cutoff = now - cfg.retentionSeconds;
+    if (messages.some((m) => m.received < cutoff)) {
+      await store.purgeMessages(cutoff, ctx.id);
+      return json(200, { messages: messages.filter((m) => m.received >= cutoff) });
+    }
+    return json(200, { messages });
   }
 
   async function deleteMessage(request, ctx, messageId) {

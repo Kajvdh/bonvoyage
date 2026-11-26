@@ -18,8 +18,8 @@ export class NodeStore {
   }
 
   async getInbox(id) {
-    const row = this.db.prepare("SELECT tokens FROM inboxes WHERE id = ?").get(id);
-    return row ? { tokens: JSON.parse(row.tokens) } : null;
+    const row = this.db.prepare("SELECT tokens, last_collected FROM inboxes WHERE id = ?").get(id);
+    return row ? { tokens: JSON.parse(row.tokens), lastCollected: row.last_collected } : null;
   }
 
   async countInboxes() {

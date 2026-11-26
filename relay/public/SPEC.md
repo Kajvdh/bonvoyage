@@ -337,10 +337,11 @@ sense of section 1.1.
 ```json
 {"bonvoyage": 1, "max_message_bytes": 61488, "max_messages": 50,
  "max_messages_per_token": 10, "retention_seconds": 604800,
- "max_tokens": 64, "registration": "open"}
+ "max_tokens": 64, "poll_seconds": 60, "registration": "open"}
 ```
 
-`registration` is `open`, `invite` (section 6.3) or `closed`.
+`poll_seconds` is how long the relay asks clients to wait between collections
+(section 6.5). `registration` is `open`, `invite` (section 6.3) or `closed`.
 
 ### 6.2 Owner authentication
 
@@ -446,7 +447,10 @@ the relay and is not proof of anything (section 3.3), but it is useful for
 revoking a token that delivers messages which keep being discarded, which a
 recipient SHOULD do.
 
-Clients SHOULD poll no more often than once every 30 seconds.
+Clients SHOULD wait at least the relay's `poll_seconds` between collections,
+and MUST NOT collect more often than once every 30 seconds. A relay's capacity
+is mostly spent on polling, so a client that can live with a slower rhythm
+(every five minutes is plenty for most homes) should use it.
 
 ## 7. Tickets
 
