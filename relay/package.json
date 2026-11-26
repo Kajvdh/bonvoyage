@@ -1,0 +1,21 @@
+{
+  "name": "bonvoyage-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Relay for the Bonvoyage ticket printer protocol: runs on Cloudflare Workers or Node",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/",
+    "dev": "wrangler dev",
+    "deploy": "node site/build.js && wrangler deploy",
+    "build:site": "node site/build.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "devDependencies": {
+    "marked": "^18.3.0",
+    "wrangler": "^4.168.0"
+  }
+}

@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bonvoyage protocol, version 1</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧾</text></svg>">
+<style>
+:root {
+  --paper:#f5f2ea; --card:#fffdf8; --ink:#1c1b18; --soft:#5f5b52; --line:#ddd7c9; --accent:#d9480f; --accent-ink:#fff;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --paper:#151410; --card:#1e1d18; --ink:#ece8dd; --soft:#a7a294; --line:#34322b; --accent:#ff7a3d; --accent-ink:#1a0d05; }
+}
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; }
+body { margin:0; background:var(--paper); color:var(--ink); font:17px/1.6 var(--sans); -webkit-font-smoothing:antialiased; }
+a { color:inherit; text-decoration-color:var(--accent); text-underline-offset:3px; }
+a:hover { color:var(--accent); }
+.wrap { max-width:1060px; margin:0 auto; padding:0 24px; }
+header.top { display:flex; align-items:center; gap:24px; padding:22px 0; }
+.mark { font:700 18px var(--mono); letter-spacing:.14em; text-decoration:none; }
+.mark b { color:var(--accent); font-weight:700; }
+header.top nav { margin-left:auto; display:flex; gap:22px; font-size:15px; }
+header.top nav a { text-decoration:none; color:var(--soft); }
+header.top nav a:hover { color:var(--ink); }
+.eyebrow { font:600 12.5px var(--mono); letter-spacing:.16em; text-transform:uppercase; color:var(--accent); margin:0 0 14px; }
+h1 { font-size:clamp(38px, 6vw, 62px); line-height:1.04; letter-spacing:-.025em; margin:0 0 22px; font-weight:750; }
+h2 { font-size:clamp(27px, 3.6vw, 36px); line-height:1.15; letter-spacing:-.02em; margin:0 0 14px; }
+h3 { font-size:18px; margin:0 0 6px; }
+p { margin:0 0 16px; }
+.lead { font-size:20px; color:var(--soft); max-width:34em; }
+section { padding:76px 0; border-top:1px solid var(--line); }
+.hero { display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr); gap:56px; align-items:center; padding:48px 0 84px; }
+.buttons { display:flex; flex-wrap:wrap; gap:12px; margin-top:30px; }
+.btn { display:inline-block; padding:13px 22px; border-radius:10px; font-weight:600; text-decoration:none; border:1.5px solid var(--ink); }
+.btn.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
+.btn.primary:hover { filter:brightness(1.08); color:var(--accent-ink); }
+.btn:hover { border-color:var(--accent); }
+
+/* the ticket */
+.ticket { justify-self:center; width:min(100%, 330px); background:#fffef9; color:#1c1b18; font:14.5px/1.45 var(--mono); padding:26px 22px 34px; transform:rotate(2.2deg);
+  box-shadow:0 1px 0 rgba(0,0,0,.05), 0 18px 40px -12px rgba(0,0,0,.35);
+  --z:9px; -webkit-mask:conic-gradient(from -45deg at bottom, #0000, #000 1deg 89deg, #0000 90deg) bottom/calc(2*var(--z)) 51% repeat-x, linear-gradient(#000 0 0) top/100% 51% no-repeat;
+          mask:conic-gradient(from -45deg at bottom, #0000, #000 1deg 89deg, #0000 90deg) bottom/calc(2*var(--z)) 51% repeat-x, linear-gradient(#000 0 0) top/100% 51% no-repeat; }
+.ticket .big { font-size:25px; font-weight:800; text-align:center; letter-spacing:.06em; }
+.ticket .c { text-align:center; }
+.ticket hr { border:0; border-top:1.5px dashed #1c1b18; margin:11px 0; opacity:.75; }
+.ticket .inv { background:#1c1b18; color:#fffef9; padding:1px 8px; }
+.ticket .row { display:flex; justify-content:space-between; gap:8px; }
+.ticket .dim { opacity:.6; }
+.ticket svg { display:block; margin:10px auto 4px; }
+
+/* how it works */
+.flow { display:grid; grid-template-columns:1fr auto 1fr auto 1fr; gap:14px; align-items:stretch; margin:36px 0 12px; }
+.node { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px; }
+.node .tag { font:600 12px var(--mono); letter-spacing:.14em; text-transform:uppercase; color:var(--soft); }
+.node strong { display:block; font-size:19px; margin:4px 0 6px; }
+.node p { font-size:15px; color:var(--soft); margin:0; }
+.node.relay { border-style:dashed; }
+.arrow { align-self:center; color:var(--accent); font:700 13px var(--mono); text-align:center; white-space:nowrap; }
+.arrow span { display:block; font-size:26px; line-height:1; }
+ol.steps { counter-reset:s; list-style:none; padding:0; margin:34px 0 0; display:grid; grid-template-columns:repeat(3, 1fr); gap:28px; }
+ol.steps li { counter-increment:s; }
+ol.steps li::before { content:counter(s, decimal-leading-zero); font:700 14px var(--mono); color:var(--accent); display:block; margin-bottom:8px; }
+ol.steps p { color:var(--soft); font-size:16px; margin:0; }
+
+.grid { display:grid; grid-template-columns:repeat(2, 1fr); gap:18px; margin-top:34px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:24px; }
+.card p { color:var(--soft); margin:0; font-size:16px; }
+.card .ico { font-size:26px; display:block; margin-bottom:10px; }
+
+.sees { display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-top:30px; }
+.sees ul { list-style:none; padding:0; margin:12px 0 0; }
+.sees li { padding:9px 0 9px 30px; position:relative; border-top:1px solid var(--line); font-size:16px; }
+.sees li::before { position:absolute; left:2px; font-weight:700; }
+.never li::before { content:"\2715"; color:var(--accent); }
+.does li::before { content:"\25CB"; color:var(--soft); }
+.sees small { color:var(--soft); }
+
+.two { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:44px; align-items:start; }
+pre { background:#16150f; color:#ece8dd; border-radius:14px; padding:20px 22px; overflow-x:auto; font:14px/1.55 var(--mono); margin:0; border:1px solid #2c2a23; }
+pre .k { color:#ff9d6b; } pre .s { color:#b9d28a; } pre .c { color:#8d887a; }
+code { font:.9em var(--mono); background:color-mix(in srgb, var(--ink) 8%, transparent); padding:2px 6px; border-radius:5px; }
+pre code { background:none; padding:0; font-size:inherit; }
+ul.check { list-style:none; padding:0; margin:18px 0 0; }
+ul.check li { padding:8px 0 8px 30px; position:relative; }
+ul.check li::before { content:"\2192"; position:absolute; left:2px; color:var(--accent); font-weight:700; }
+.links { display:flex; flex-wrap:wrap; gap:10px; margin-top:22px; }
+.links a { font:600 14px var(--mono); padding:9px 14px; border:1px solid var(--line); border-radius:9px; text-decoration:none; background:var(--card); }
+.links a:hover { border-color:var(--accent); }
+
+dl.limits { display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; margin:28px 0 0; }
+dl.limits div { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; }
+dl.limits dt { font:600 11.5px var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--soft); }
+dl.limits dd { margin:4px 0 0; font-size:22px; font-weight:700; }
+.host { font-family:var(--mono); color:var(--accent); }
+footer { border-top:1px solid var(--line); padding:30px 0 50px; color:var(--soft); font-size:14.5px; display:flex; flex-wrap:wrap; gap:8px 24px; }
+footer span:first-child { font-family:var(--mono); letter-spacing:.1em; }
+
+.corner { position:absolute; top:0; right:0; z-index:5; }
+.corner svg { fill:var(--ink); color:var(--paper); display:block; }
+.corner:hover .arm { animation:wave .56s ease-in-out; }
+.corner .arm { transform-origin:130px 106px; }
+@keyframes wave { 0%,100% { transform:rotate(0); } 20%,60% { transform:rotate(-25deg); } 40%,80% { transform:rotate(10deg); } }
+header.top { padding-right:64px; }
+.tabs { display:flex; gap:8px; margin:26px 0 0; flex-wrap:wrap; }
+.path { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:26px; }
+.path h3 { font-size:20px; }
+.path .who { font:600 12px var(--mono); letter-spacing:.14em; text-transform:uppercase; color:var(--accent); display:block; margin-bottom:8px; }
+.path p { color:var(--soft); font-size:16px; }
+.path pre { margin-top:14px; }
+.explain { border-left:3px solid var(--accent); padding:4px 0 4px 18px; margin:22px 0 0; color:var(--soft); font-size:16px; }
+.explain b { color:var(--ink); }
+blockquote.prompt { margin:14px 0 0; padding:16px 18px; background:color-mix(in srgb, var(--accent) 9%, var(--card)); border:1px dashed var(--accent); border-radius:12px; font:14.5px/1.55 var(--mono); }
+@media (max-width: 860px) {
+  .hero { grid-template-columns:1fr; gap:40px; padding-top:24px; }
+  .flow { grid-template-columns:1fr; } .arrow span { transform:rotate(90deg); display:inline-block; }
+  ol.steps, .grid, .sees, .two { grid-template-columns:1fr; }
+  dl.limits { grid-template-columns:repeat(2, 1fr); }
+  header.top nav a:not(.keep) { display:none; }
+  .corner svg { width:62px; height:62px; }
+  section { padding:56px 0; }
+}
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+
+.doc { max-width:760px; padding:20px 0 80px; }
+.doc h1 { font-size:clamp(32px, 5vw, 44px); margin:18px 0 20px; }
+.doc h2 { font-size:27px; margin:56px 0 12px; padding-top:22px; border-top:1px solid var(--line); }
+.doc h3 { font-size:19px; margin:32px 0 8px; }
+.doc ul, .doc ol { padding-left:24px; margin:0 0 16px; }
+.doc li { margin:5px 0; }
+.doc pre { margin:0 0 18px; }
+.doc table { width:100%; border-collapse:collapse; margin:0 0 20px; font-size:15.5px; display:block; overflow-x:auto; }
+.doc th, .doc td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top; }
+.doc th { font:600 12px var(--mono); letter-spacing:.1em; text-transform:uppercase; color:var(--soft); }
+.doc td code { white-space:nowrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <a class="mark" href="/">BON<b>VOYAGE</b></a>
+  <nav><a class="keep" href="/">&larr; Overview</a><a class="keep" href="/vectors/v1.json">Test vectors</a><a class="keep" href="https://github.com/Kajvdh/bonvoyage">GitHub</a></nav>
+</header>
+<main class="doc">
+<h1 id="bonvoyage-protocol-version-1-draft">Bonvoyage protocol, version 1 (draft)</h1>
+<p>Bonvoyage lets ticket printers in different homes send each other tickets.
+Nothing at home is reachable from the internet, and the relay that carries the
+tickets cannot read them.</p>
+<p>This document is the whole protocol. Anyone with a ticket printer should be
+able to implement it from this text and check the result against the test
+vectors in <code>vectors/</code>.</p>
+<p>The words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.</p>
+<h2 id="1-overview">1. Overview</h2>
+<ul>
+<li>A <strong>printer</strong> is one installation: some software in front of a ticket printer.</li>
+<li>Every printer has an <strong>identity</strong>: two key pairs it generates itself.</li>
+<li>Every printer has an <strong>inbox</strong> on a <strong>relay</strong>. Printers only ever connect
+<em>out</em> to relays, over HTTPS.</li>
+<li>To send a ticket, the sender builds a <strong>message</strong>, signs it, seals it for the
+recipient and drops it in the recipient&#39;s inbox.</li>
+<li>The recipient polls its inbox, opens and checks each message, applies its own
+rules, and prints.</li>
+</ul>
+<pre><code> sender printer                relay                recipient printer
+       |   POST sealed message   |                          |
+       |------------------------&gt;|                          |
+       |                         |   GET inbox (signed)     |
+       |                         |&lt;-------------------------|
+       |                         |   sealed messages        |
+       |                         |-------------------------&gt;|
+       |                         |   DELETE message         |
+       |                         |&lt;-------------------------|
+</code></pre>
+<h3 id="1-1-privacy-goals">1.1 Privacy goals</h3>
+<p>The relay is not trusted with content.</p>
+<p>A relay can never learn: the ticket, who sent it, or the sender&#39;s address. All
+of that is inside the sealed part.</p>
+<p>A relay does learn, and no relay design can avoid this: that an inbox received
+a message, when, its padded size (section 5.3), which drop token was used
+(section 4), and the network address of the client that connected. A relay
+SHOULD NOT log network addresses.</p>
+<h3 id="1-2-encodings">1.2 Encodings</h3>
+<ul>
+<li><strong>base64url</strong> means RFC 4648 section 5, without <code>=</code> padding.</li>
+<li>All JSON is UTF-8. Unknown JSON members MUST be ignored, so that later
+versions can add fields.</li>
+<li>Times are Unix time in whole seconds.</li>
+</ul>
+<h2 id="2-cryptography">2. Cryptography</h2>
+<p>Bonvoyage uses the NaCl / libsodium primitives, which exist for every common
+language:</p>
+<table>
+<thead>
+<tr>
+<th>Purpose</th>
+<th>Primitive</th>
+<th>libsodium name</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Signing</td>
+<td>Ed25519</td>
+<td><code>crypto_sign_detached</code></td>
+</tr>
+<tr>
+<td>Sealing for a recipient</td>
+<td>X25519 + XSalsa20-Poly1305 &quot;sealed box&quot;</td>
+<td><code>crypto_box_seal</code></td>
+</tr>
+<tr>
+<td>Hashing</td>
+<td>SHA-256</td>
+<td></td>
+</tr>
+</tbody></table>
+<p>An identity consists of:</p>
+<ul>
+<li>a <strong>signing key pair</strong> (Ed25519), public part 32 bytes;</li>
+<li>an <strong>encryption key pair</strong> (X25519), public part 32 bytes.</li>
+</ul>
+<p>The two key pairs are independent. Private keys never leave the printer.</p>
+<h2 id="3-addresses-and-contact-cards">3. Addresses and contact cards</h2>
+<h3 id="3-1-inbox-id-and-address">3.1 Inbox ID and address</h3>
+<p>The <strong>inbox ID</strong> is the base64url encoding of the public signing key
+(43 characters).</p>
+<p>An <strong>address</strong> is <code>&lt;inbox ID&gt;@&lt;relay host&gt;</code>, for example:</p>
+<pre><code>m3cX0R1bq0u0m1cX0R1bq0u0m1cX0R1bq0u0m1cX0R1@bonvoyage.kaj.dev
+</code></pre>
+<p>The relay&#39;s base URL is <code>https://&lt;relay host&gt;</code>. A relay host MAY include a
+port. Clients MUST use HTTPS, except for <code>localhost</code> during development.</p>
+<h3 id="3-2-contact-card">3.2 Contact card</h3>
+<p>To let someone send you tickets, you give them a <strong>contact card</strong>: a URI that
+is easy to put in a QR code.</p>
+<pre><code>bonvoyage://&lt;relay host&gt;/&lt;inbox ID&gt;?k=&lt;encryption key&gt;&amp;t=&lt;drop token&gt;&amp;n=&lt;name&gt;
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Part</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>relay host, inbox ID</td>
+<td>your address</td>
+</tr>
+<tr>
+<td><code>k</code></td>
+<td>your public encryption key, base64url</td>
+</tr>
+<tr>
+<td><code>t</code></td>
+<td>a drop token for your inbox (section 4), base64url</td>
+</tr>
+<tr>
+<td><code>n</code></td>
+<td>a display name, percent-encoded, optional</td>
+</tr>
+</tbody></table>
+<p>A card contains a drop token and is therefore a <strong>secret</strong>: whoever holds it
+can drop messages in your inbox. Hand it over privately. Printing it as a QR
+code on a ticket for the other person to scan is the intended way.</p>
+<p>Each contact SHOULD get their own card with their own drop token, so that one
+contact can be removed without affecting the others.</p>
+<h3 id="3-3-pairing">3.3 Pairing</h3>
+<p>Pairing is one-directional: a card lets its holder send to its issuer. For
+tickets in both directions, both people give each other a card.</p>
+<p>The recipient learns who a sender is as follows. When you issue a card you
+remember which contact its drop token belongs to. The relay tells you which
+token each message arrived with (section 6.4). The first validly signed
+message that arrives with a given token <strong>pins</strong> that sender&#39;s signing key to
+that contact. From then on, messages with that token MUST be signed by the
+pinned key; others MUST be discarded.</p>
+<h2 id="4-drop-tokens">4. Drop tokens</h2>
+<p>A <strong>drop token</strong> is 32 random bytes generated by the inbox owner.</p>
+<p>The owner registers the <strong>token ID</strong>, which is the lowercase hex SHA-256 of
+the 32 token bytes, with the relay. The relay never sees a token until a
+sender uses it, and stores only token IDs.</p>
+<p>Removing a token ID from the inbox revokes that contact&#39;s ability to send.</p>
+<h2 id="5-messages">5. Messages</h2>
+<h3 id="5-1-the-message">5.1 The message</h3>
+<p>A message is a JSON object:</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th>Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>v</code></td>
+<td>number</td>
+<td>protocol version, <code>1</code></td>
+</tr>
+<tr>
+<td><code>id</code></td>
+<td>string</td>
+<td>16 random bytes, base64url; unique per message</td>
+</tr>
+<tr>
+<td><code>type</code></td>
+<td>string</td>
+<td><code>&quot;ticket&quot;</code> (others are reserved; unknown types MUST be ignored)</td>
+</tr>
+<tr>
+<td><code>from</code></td>
+<td>string</td>
+<td>sender&#39;s address</td>
+</tr>
+<tr>
+<td><code>from_name</code></td>
+<td>string</td>
+<td>sender&#39;s display name, optional</td>
+</tr>
+<tr>
+<td><code>to</code></td>
+<td>string</td>
+<td>recipient&#39;s address</td>
+</tr>
+<tr>
+<td><code>created</code></td>
+<td>number</td>
+<td>when it was made</td>
+</tr>
+<tr>
+<td><code>expires</code></td>
+<td>number</td>
+<td>optional; do not print after this time</td>
+</tr>
+<tr>
+<td><code>ticket</code></td>
+<td>object</td>
+<td>the ticket (section 7), for type <code>ticket</code></td>
+</tr>
+</tbody></table>
+<h3 id="5-2-signing">5.2 Signing</h3>
+<p>Let <code>M</code> be the UTF-8 bytes of the message JSON, exactly as the sender
+serialised them. The signature is Ed25519 over the bytes:</p>
+<pre><code>&quot;bonvoyage-v1-message\n&quot; || M
+</code></pre>
+<p>The <strong>signed message</strong> is the JSON object</p>
+<pre><code class="language-json">{&quot;msg&quot;: &quot;&lt;base64url of M&gt;&quot;, &quot;sig&quot;: &quot;&lt;base64url of the 64-byte signature&gt;&quot;}
+</code></pre>
+<p>Signing the exact bytes avoids any need to canonicalise JSON. Verifiers MUST
+verify against the decoded bytes of <code>msg</code>, and only then parse them.</p>
+<h3 id="5-3-padding-and-sealing">5.3 Padding and sealing</h3>
+<p>Let <code>S</code> be the UTF-8 bytes of the signed message JSON. The padded plaintext is</p>
+<pre><code>P = uint32_be(len(S)) || S || zero bytes
+</code></pre>
+<p>with as many zero bytes as needed to make <code>len(P)</code> a multiple of 4096.</p>
+<p>The <strong>sealed message</strong> is <code>crypto_box_seal(P, recipient public encryption key)</code>.
+Its length is <code>len(P) + 48</code>. A sealed message MUST NOT exceed 65536 bytes,
+which leaves 61436 bytes for <code>S</code>.</p>
+<h3 id="5-4-receiving">5.4 Receiving</h3>
+<p>For every sealed message collected, a recipient MUST:</p>
+<ol>
+<li>open it with its encryption key pair; on failure discard it;</li>
+<li>read the length, take <code>S</code>, and parse the signed message;</li>
+<li>decode <code>msg</code> to bytes <code>M</code> and parse the message;</li>
+<li>check <code>v</code> is <code>1</code> and <code>to</code> equals its own address;</li>
+<li>take the sender&#39;s public signing key from the inbox ID in <code>from</code> and verify
+<code>sig</code> over <code>&quot;bonvoyage-v1-message\n&quot; || M</code>;</li>
+<li>check the sender against the token the message arrived with (section 3.3);</li>
+<li>discard it if <code>id</code> was seen before, if <code>created</code> is more than 10 minutes in
+the future, or if <code>expires</code> has passed;</li>
+<li>apply its own policy (section 8), then print or queue it;</li>
+<li>delete the message from the relay.</li>
+</ol>
+<p>A message that fails any check MUST be deleted from the relay and MUST NOT be
+printed. Recipients SHOULD remember seen <code>id</code> values for at least 14 days.</p>
+<h2 id="6-relay-http-interface">6. Relay HTTP interface</h2>
+<p>All paths are relative to the relay&#39;s base URL. Bodies and responses are JSON
+unless stated. Errors use the matching HTTP status with
+<code>{&quot;error&quot;: &quot;&lt;short text&gt;&quot;}</code>.</p>
+<h3 id="6-1-relay-information">6.1 Relay information</h3>
+<p><code>GET /v1</code> returns the relay&#39;s limits:</p>
+<pre><code class="language-json">{&quot;bonvoyage&quot;: 1, &quot;max_message_bytes&quot;: 65536, &quot;max_messages&quot;: 50,
+ &quot;retention_seconds&quot;: 604800, &quot;max_tokens&quot;: 64, &quot;registration&quot;: &quot;open&quot;}
+</code></pre>
+<h3 id="6-2-owner-authentication">6.2 Owner authentication</h3>
+<p>Requests marked <strong>owner</strong> are signed with the inbox&#39;s signing key. The client
+sends the header</p>
+<pre><code>Bonvoyage-Auth: t=&lt;time&gt;,sig=&lt;base64url signature&gt;
+</code></pre>
+<p>where the signature is Ed25519 over the UTF-8 bytes of</p>
+<pre><code>&quot;bonvoyage-v1-request\n&quot; || METHOD || &quot;\n&quot; || PATH || &quot;\n&quot; || time || &quot;\n&quot; || hex(SHA-256(body))
+</code></pre>
+<p><code>METHOD</code> is upper case, <code>PATH</code> is the request path without query string, and
+<code>body</code> is the exact request body (empty for requests without one). The relay
+MUST reject a request whose time differs from its own by more than 300
+seconds, or whose signature does not verify against the inbox ID in the path
+(<code>401</code>).</p>
+<h3 id="6-3-inbox-management-owner">6.3 Inbox management (owner)</h3>
+<p><code>PUT /v1/inbox/&lt;inbox ID&gt;</code> creates the inbox or replaces its settings.</p>
+<pre><code class="language-json">{&quot;tokens&quot;: [&quot;&lt;token ID&gt;&quot;, &quot;...&quot;]}
+</code></pre>
+<p><code>tokens</code> is the complete list of accepted token IDs. Replacing the list is how
+tokens are added and revoked. Response <code>200</code> with the stored settings.</p>
+<p><code>DELETE /v1/inbox/&lt;inbox ID&gt;</code> removes the inbox and everything in it (<code>204</code>).</p>
+<p>A relay MAY refuse new inboxes (<code>403</code>), for example when registration is
+closed or it is full. A relay MAY remove an inbox that has not been collected
+from for 180 days.</p>
+<h3 id="6-4-dropping-a-message-sender">6.4 Dropping a message (sender)</h3>
+<p><code>POST /v1/inbox/&lt;inbox ID&gt;/messages</code></p>
+<ul>
+<li>Header <code>Authorization: Bearer &lt;drop token, base64url&gt;</code>.</li>
+<li>Header <code>Content-Type: application/octet-stream</code>.</li>
+<li>Body: the sealed message, raw bytes.</li>
+</ul>
+<p>The relay accepts it (<code>201</code>, body <code>{&quot;id&quot;: &quot;&lt;relay message id&gt;&quot;}</code>) when the
+inbox exists, the SHA-256 of the decoded token is one of the inbox&#39;s token IDs,
+the body is at most <code>max_message_bytes</code>, and the inbox holds fewer than
+<code>max_messages</code> messages. Otherwise: <code>401</code> when the inbox does not exist or the
+token is not accepted, <code>413</code> if the body is too large, <code>429</code> if the inbox is
+full.</p>
+<p>The relay MUST NOT reveal whether a <code>401</code> was caused by an unknown inbox or by
+an unknown token; both get the same response.</p>
+<h3 id="6-5-collecting-owner">6.5 Collecting (owner)</h3>
+<p><code>GET /v1/inbox/&lt;inbox ID&gt;/messages</code> returns up to 20 of the oldest messages:</p>
+<pre><code class="language-json">{&quot;messages&quot;: [
+  {&quot;id&quot;: &quot;&lt;relay message id&gt;&quot;, &quot;received&quot;: 1795000000,
+   &quot;token&quot;: &quot;&lt;token ID it arrived with&gt;&quot;, &quot;body&quot;: &quot;&lt;base64url sealed message&gt;&quot;}
+]}
+</code></pre>
+<p><code>DELETE /v1/inbox/&lt;inbox ID&gt;/messages/&lt;relay message id&gt;</code> removes one message
+(<code>204</code>, also when it no longer exists).</p>
+<p>Collecting does not remove messages; the recipient deletes each one after
+handling it. A message that is never deleted is removed by the relay after
+<code>retention_seconds</code>.</p>
+<p>Clients SHOULD poll no more often than once every 30 seconds.</p>
+<h2 id="7-tickets">7. Tickets</h2>
+<p>A ticket describes content, not printer commands. Every recipient renders it
+in its own way, for its own paper width.</p>
+<pre><code class="language-json">{&quot;blocks&quot;: [
+  {&quot;type&quot;: &quot;text&quot;, &quot;text&quot;: &quot;Hallo!&quot;, &quot;size&quot;: &quot;large&quot;, &quot;align&quot;: &quot;center&quot;, &quot;bold&quot;: true},
+  {&quot;type&quot;: &quot;divider&quot;},
+  {&quot;type&quot;: &quot;list&quot;, &quot;style&quot;: &quot;check&quot;, &quot;items&quot;: [&quot;melk&quot;, &quot;brood&quot;]},
+  {&quot;type&quot;: &quot;qr&quot;, &quot;data&quot;: &quot;https://example.com&quot;}
+]}
+</code></pre>
+<h3 id="7-1-blocks">7.1 Blocks</h3>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Members</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>text</code></td>
+<td><code>text</code>; optional <code>align</code> (<code>left</code>, <code>center</code>, <code>right</code>), <code>bold</code>, <code>underline</code>, <code>size</code> (<code>small</code>, <code>normal</code>, <code>large</code>, <code>huge</code>)</td>
+<td>A paragraph. Line breaks in <code>text</code> are kept; the recipient wraps long lines.</td>
+</tr>
+<tr>
+<td><code>divider</code></td>
+<td></td>
+<td>A horizontal rule.</td>
+</tr>
+<tr>
+<td><code>list</code></td>
+<td><code>items</code> (strings); optional <code>style</code> (<code>bullet</code>, <code>number</code>, <code>check</code>)</td>
+<td>A list. <code>check</code> draws a box to tick.</td>
+</tr>
+<tr>
+<td><code>qr</code></td>
+<td><code>data</code>; optional <code>caption</code></td>
+<td>A QR code containing <code>data</code>.</td>
+</tr>
+<tr>
+<td><code>image</code></td>
+<td><code>png</code> (base64url PNG); optional <code>alt</code>, <code>align</code></td>
+<td>A picture, at most 576 pixels wide and 1200 high. Recipients scale it to their paper and convert it to black and white.</td>
+</tr>
+<tr>
+<td><code>space</code></td>
+<td>optional <code>lines</code> (1 to 5)</td>
+<td>Blank lines.</td>
+</tr>
+</tbody></table>
+<p>Rules:</p>
+<ul>
+<li>A recipient MUST support <code>text</code>, <code>divider</code>, <code>list</code> and <code>space</code>. If it cannot
+render a <code>qr</code> or <code>image</code> block it prints the <code>caption</code> or <code>alt</code> text instead,
+or nothing.</li>
+<li>Unknown block types and unknown members MUST be skipped without error.</li>
+<li>Unknown values for <code>size</code>, <code>align</code> or <code>style</code> are treated as the default.</li>
+<li>A ticket has at most 100 blocks and at most 8000 characters of text in total.</li>
+<li>Text may contain any Unicode. A recipient replaces what its printer cannot
+show.</li>
+</ul>
+<h3 id="7-2-what-a-recipient-must-never-do">7.2 What a recipient must never do</h3>
+<ul>
+<li>It MUST NOT send any part of a ticket to the printer as raw commands.</li>
+<li>It MUST NOT fetch URLs or other remote resources because a ticket mentions
+them. A QR code is drawn, never followed.</li>
+</ul>
+<h2 id="8-recipient-policy">8. Recipient policy</h2>
+<p>Paper comes out in someone&#39;s home, so the recipient&#39;s rules always win. A
+recipient:</p>
+<ul>
+<li>MUST discard messages from senders it has not paired with;</li>
+<li>SHOULD limit how many tickets each contact can print per day;</li>
+<li>SHOULD respect its own quiet hours, holding tickets until they end;</li>
+<li>SHOULD mark a received ticket with the sender&#39;s name and that it arrived
+through Bonvoyage;</li>
+<li>MAY hold tickets for approval by a person before printing;</li>
+<li>MAY drop tickets silently. There are no delivery receipts in version 1, so a
+sender cannot tell whether a ticket was printed.</li>
+</ul>
+<h2 id="9-security-notes">9. Security notes</h2>
+<ul>
+<li><strong>Forwarding.</strong> <code>to</code> is inside the signed bytes, so a recipient cannot
+re-seal someone&#39;s message for a third party and have it accepted.</li>
+<li><strong>Replay.</strong> The relay could deliver a message twice; the <code>id</code> check stops a
+second print.</li>
+<li><strong>Stolen card.</strong> A leaked card lets a stranger drop messages, but the
+pinned-key rule (section 3.3) means they are discarded once the real contact
+has sent a first message. Before that first message, the stranger could be
+pinned instead; issue cards privately and revoke a token if in doubt.</li>
+<li><strong>Relay misbehaviour.</strong> A relay can drop, delay or duplicate messages. It
+cannot read, alter or forge them.</li>
+<li><strong>Lost keys.</strong> There is no recovery. A printer that loses its keys creates a
+new identity and pairs again.</li>
+</ul>
+
+</main>
+<footer><span>BONVOYAGE</span><span>Protocol version 1, draft</span></footer>
+</div>
+</body>
+</html>

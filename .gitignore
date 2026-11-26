@@ -1,0 +1,11 @@
+node_modules/
+.wrangler/
+*.db
+*.db-shm
+*.db-wal
+__pycache__/
+.pytest_cache/
+.venv/
+# identities hold private keys
+*.identity.json
+wrangler.prod.toml

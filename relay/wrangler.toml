@@ -1,0 +1,31 @@
+# Cloudflare Workers deployment of the Bonvoyage relay. See ../README.md.
+name = "bonvoyage-relay"
+main = "src/worker.js"
+compatibility_date = "2025-09-01"
+
+# The relay must not keep request logs: they would hold client addresses.
+[observability]
+enabled = false
+
+[vars]
+REGISTRATION = "open" # "closed" stops new inboxes; existing ones keep working
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bonvoyage"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+# The landing page, the rendered spec and the test vectors (built by `npm run build:site`).
+# Files here are served directly; everything else goes to the relay code.
+[assets]
+directory = "./public"
+
+# Daily cleanup of expired messages and long-unused inboxes.
+[triggers]
+crons = ["17 3 * * *"]
+
+# Serve it on your own domain (the zone must be in the same Cloudflare account):
+# [[routes]]
+# pattern = "bonvoyage.example.com"
+# custom_domain = true
