@@ -163,10 +163,12 @@ blockquote.prompt { margin:14px 0 0; padding:16px 18px; background:color-mix(in 
     <div class="big">BONVOYAGE</div>
     <div class="c dim">ticket from Jan</div>
     <hr>
-    <div>Koffie om 10u? Ik trakteer.</div>
+    <div>Congrats on the new printer!</div>
+    <div>Welcome to the club.</div>
     <br>
-    <div>[ ] ja, graag</div>
-    <div>[ ] nee, te druk</div>
+    <div>First things to print:</div>
+    <div>[ ] a shopping list</div>
+    <div>[ ] a terrible joke</div>
     <hr>
     <div class="row"><span>signed</span><span>&#10003; Jan</span></div>
     <div class="row"><span>sealed for</span><span>you only</span></div>
@@ -230,12 +232,12 @@ python examples/bonvoyage.py card jan.json Kaj
 
 <span class="c"># Kaj sends Jan a ticket with it</span>
 python examples/bonvoyage.py send kaj.json \
-    <span class="s">'bonvoyage://...'</span> <span class="s">'Koffie om 10u?'</span>
+    <span class="s">'bonvoyage://...'</span> <span class="s">'Welcome to the club!'</span>
 
 <span class="c"># Jan collects</span>
 python examples/bonvoyage.py receive jan.json
 <span class="c">#  -> --- from Kaj ---</span>
-<span class="c">#     Koffie om 10u?</span></code></pre>
+<span class="c">#     Welcome to the club!</span></code></pre>
   </div>
 </section>
 

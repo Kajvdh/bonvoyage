@@ -32,7 +32,7 @@ Needs Python 3.10+ and PyNaCl.
     python examples/bonvoyage.py card jan.json Kaj
 
     # Kaj sends Jan a ticket with that card
-    python examples/bonvoyage.py send kaj.json 'bonvoyage://...' 'Koffie om 10u?'
+    python examples/bonvoyage.py send kaj.json 'bonvoyage://...' 'Welcome to the club!'
 
     # Jan collects
     python examples/bonvoyage.py receive jan.json
