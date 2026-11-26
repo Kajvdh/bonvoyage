@@ -113,10 +113,23 @@ to log client addresses**; the relay itself logs nothing about requests.
 
 | | |
 |---|---|
-| `REGISTRATION` | `open` (default) lets anyone create an inbox; `closed` keeps existing inboxes working and refuses new ones. |
+| `REGISTRATION` | `open` (default) lets anyone create an inbox. `invite` asks for a code when an inbox is created. `closed` refuses new inboxes. Existing inboxes keep working in every mode. |
+| `INVITE_CODE` | The code for `invite` mode. On Cloudflare set it with `npx wrangler secret put INVITE_CODE`. |
 
-Limits (message size, messages per inbox, retention) are in
-`relay/src/core.js` and are reported at `GET /v1`.
+Limits are in `relay/src/core.js`; the ones clients need are reported at
+`GET /v1`.
+
+### Running a public relay
+
+The relay protects itself where it can: a sender's share of an inbox is
+capped, the relay's total storage is capped, new inboxes are limited per hour,
+unused inboxes expire, and bad requests are refused before their body is read.
+
+What it cannot do from inside is stop someone from simply sending a very
+large number of requests. Put a rate limit in front of it: on Cloudflare, a
+rate limiting rule for the relay's host name (the free plan includes one); on
+your own server, your reverse proxy's rate limiting. Per-address counters that
+live for minutes are fine; request logs are not (see section 1.1 of the spec).
 
 ### Checking a relay
 
@@ -125,6 +138,18 @@ The conformance tests run against any relay:
     cd relay
     npm test                                         # in-process
     RELAY_URL=https://relay.example npm test         # a running relay
+
+## Security
+
+The spec was reviewed adversarially before the first clients were written, and
+the findings are folded into the current draft: pairing no longer trusts the
+relay, replay and paper use are bounded, cards are signed and strictly parsed,
+and malformed input is discarded rather than fatal. Section 9 of the spec
+lists what remains true by design (no forward secrecy, signatures are
+transferable proof, a card proves possession and nothing more).
+
+If you find a problem, please open an issue, or contact the maintainer
+privately first if it puts people's printers at risk.
 
 ## Development
 

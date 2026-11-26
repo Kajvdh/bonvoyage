@@ -8,7 +8,7 @@ compatibility_date = "2025-09-01"
 enabled = false
 
 [vars]
-REGISTRATION = "open" # "closed" stops new inboxes; existing ones keep working
+REGISTRATION = "open" # "invite" asks new inboxes for INVITE_CODE (set it with `wrangler secret put INVITE_CODE`); "closed" refuses them
 
 [[d1_databases]]
 binding = "DB"

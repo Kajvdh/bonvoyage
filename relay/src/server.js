@@ -7,9 +7,10 @@ import { NodeStore } from "./store-node.js";
 
 const port = Number(process.env.PORT || 8787);
 const relay = createRelay(new NodeStore(process.env.BONVOYAGE_DB || "bonvoyage.db"), {
-  registration: process.env.REGISTRATION === "closed" ? "closed" : "open",
+  registration: ["closed", "invite"].includes(process.env.REGISTRATION) ? process.env.REGISTRATION : "open",
+  inviteCode: process.env.INVITE_CODE || "",
 });
-const MAX_BODY = 65536 + 1024;
+const MAX_BODY = 65536;
 
 // The landing page, rendered spec and test vectors: a fixed set of files read once at start.
 const PUBLIC = new URL("../public/", import.meta.url);
@@ -41,7 +42,9 @@ const server = createServer(async (req, res) => {
     chunks.push(chunk);
   }
   const hasBody = !["GET", "HEAD"].includes(req.method);
-  const request = new Request(`http://relay${req.url}`, {
+  // The host the client addressed us as is part of what owners sign (SPEC 6.2).
+  const host = /^[A-Za-z0-9.-]+(:\d{1,5})?$/.test(req.headers.host || "") ? req.headers.host : "invalid";
+  const request = new Request(`http://${host}${req.url}`, {
     method: req.method,
     headers: req.headers,
     body: hasBody ? Buffer.concat(chunks) : undefined,

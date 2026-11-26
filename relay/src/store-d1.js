@@ -13,6 +13,10 @@ export class D1Store {
     return (await this.db.prepare("SELECT COUNT(*) AS n FROM inboxes").first()).n;
   }
 
+  async countInboxesSince(since) {
+    return (await this.db.prepare("SELECT COUNT(*) AS n FROM inboxes WHERE created >= ?").bind(since).first()).n;
+  }
+
   async putInbox(id, tokens, now) {
     await this.db.prepare(
       "INSERT INTO inboxes (id, tokens, created, last_seen) VALUES (?, ?, ?, ?) " +
@@ -20,8 +24,8 @@ export class D1Store {
     ).bind(id, JSON.stringify(tokens), now, now).run();
   }
 
-  async touchInbox(id, now) {
-    await this.db.prepare("UPDATE inboxes SET last_seen = ? WHERE id = ?").bind(now, id).run();
+  async markCollected(id, now) {
+    await this.db.prepare("UPDATE inboxes SET last_seen = ?, last_collected = ? WHERE id = ?").bind(now, now, id).run();
   }
 
   async deleteInbox(id) {
@@ -31,8 +35,15 @@ export class D1Store {
     ]);
   }
 
-  async countMessages(inbox) {
-    return (await this.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE inbox = ?").bind(inbox).first()).n;
+  async countMessages(inbox, token) {
+    const query = token
+      ? this.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE inbox = ? AND token = ?").bind(inbox, token)
+      : this.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE inbox = ?").bind(inbox);
+    return (await query.first()).n;
+  }
+
+  async countAllMessages() {
+    return (await this.db.prepare("SELECT COUNT(*) AS n FROM messages").first()).n;
   }
 
   async addMessage(inbox, id, token, body, now) {
@@ -59,10 +70,20 @@ export class D1Store {
     }
   }
 
-  async purgeInboxes(before) {
+  async purgeInboxes(inactiveBefore, unusedBefore) {
+    const stale = "last_seen < ? OR (last_collected IS NULL AND created < ?)";
     await this.db.batch([
-      this.db.prepare("DELETE FROM messages WHERE inbox IN (SELECT id FROM inboxes WHERE last_seen < ?)").bind(before),
-      this.db.prepare("DELETE FROM inboxes WHERE last_seen < ?").bind(before),
+      this.db.prepare(`DELETE FROM messages WHERE inbox IN (SELECT id FROM inboxes WHERE ${stale})`).bind(inactiveBefore, unusedBefore),
+      this.db.prepare(`DELETE FROM inboxes WHERE ${stale}`).bind(inactiveBefore, unusedBefore),
     ]);
+  }
+
+  async rememberAuth(signatureHash, now) {
+    const result = await this.db.prepare("INSERT OR IGNORE INTO auth_seen (sig, t) VALUES (?, ?)").bind(signatureHash, now).run();
+    return result.meta.changes === 1;
+  }
+
+  async purgeAuth(before) {
+    await this.db.prepare("DELETE FROM auth_seen WHERE t < ?").bind(before).run();
   }
 }

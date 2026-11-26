@@ -1,14 +1,20 @@
 // Storage for self-hosting: SQLite through Node's built-in node:sqlite.
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
-const SCHEMA = new URL("../migrations/0001_init.sql", import.meta.url);
+const MIGRATIONS = new URL("../migrations/", import.meta.url);
 
 export class NodeStore {
   constructor(path = ":memory:") {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL");
-    this.db.exec(readFileSync(SCHEMA, "utf8"));
+    // Apply migrations that this database has not seen, in file-name order.
+    const files = readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")).sort();
+    const done = this.db.prepare("PRAGMA user_version").get().user_version;
+    files.slice(done).forEach((file, i) => {
+      this.db.exec(readFileSync(new URL(file, MIGRATIONS), "utf8"));
+      this.db.exec(`PRAGMA user_version = ${done + i + 1}`);
+    });
   }
 
   async getInbox(id) {
@@ -20,6 +26,10 @@ export class NodeStore {
     return this.db.prepare("SELECT COUNT(*) AS n FROM inboxes").get().n;
   }
 
+  async countInboxesSince(since) {
+    return this.db.prepare("SELECT COUNT(*) AS n FROM inboxes WHERE created >= ?").get(since).n;
+  }
+
   async putInbox(id, tokens, now) {
     this.db.prepare(
       "INSERT INTO inboxes (id, tokens, created, last_seen) VALUES (?, ?, ?, ?) " +
@@ -27,8 +37,8 @@ export class NodeStore {
     ).run(id, JSON.stringify(tokens), now, now);
   }
 
-  async touchInbox(id, now) {
-    this.db.prepare("UPDATE inboxes SET last_seen = ? WHERE id = ?").run(now, id);
+  async markCollected(id, now) {
+    this.db.prepare("UPDATE inboxes SET last_seen = ?, last_collected = ? WHERE id = ?").run(now, now, id);
   }
 
   async deleteInbox(id) {
@@ -36,8 +46,14 @@ export class NodeStore {
     this.db.prepare("DELETE FROM inboxes WHERE id = ?").run(id);
   }
 
-  async countMessages(inbox) {
+  /** Messages waiting in an inbox; with a token ID, only those that arrived with it. */
+  async countMessages(inbox, token) {
+    if (token) return this.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE inbox = ? AND token = ?").get(inbox, token).n;
     return this.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE inbox = ?").get(inbox).n;
+  }
+
+  async countAllMessages() {
+    return this.db.prepare("SELECT COUNT(*) AS n FROM messages").get().n;
   }
 
   async addMessage(inbox, id, token, body, now) {
@@ -60,8 +76,19 @@ export class NodeStore {
     else this.db.prepare("DELETE FROM messages WHERE received < ?").run(before);
   }
 
-  async purgeInboxes(before) {
-    this.db.prepare("DELETE FROM messages WHERE inbox IN (SELECT id FROM inboxes WHERE last_seen < ?)").run(before);
-    this.db.prepare("DELETE FROM inboxes WHERE last_seen < ?").run(before);
+  /** Remove inboxes not used since `inactiveBefore`, and never-collected ones created before `unusedBefore`. */
+  async purgeInboxes(inactiveBefore, unusedBefore) {
+    const stale = "last_seen < ? OR (last_collected IS NULL AND created < ?)";
+    this.db.prepare(`DELETE FROM messages WHERE inbox IN (SELECT id FROM inboxes WHERE ${stale})`).run(inactiveBefore, unusedBefore);
+    this.db.prepare(`DELETE FROM inboxes WHERE ${stale}`).run(inactiveBefore, unusedBefore);
+  }
+
+  /** Record an accepted signature. Returns false when it was already recorded. */
+  async rememberAuth(signatureHash, now) {
+    return this.db.prepare("INSERT OR IGNORE INTO auth_seen (sig, t) VALUES (?, ?)").run(signatureHash, now).changes === 1;
+  }
+
+  async purgeAuth(before) {
+    this.db.prepare("DELETE FROM auth_seen WHERE t < ?").run(before);
   }
 }

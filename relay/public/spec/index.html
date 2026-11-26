@@ -175,20 +175,43 @@ rules, and prints.</li>
        |                         |   DELETE message         |
        |                         |&lt;-------------------------|
 </code></pre>
-<h3 id="1-1-privacy-goals">1.1 Privacy goals</h3>
-<p>The relay is not trusted with content.</p>
-<p>A relay can never learn: the ticket, who sent it, or the sender&#39;s address. All
-of that is inside the sealed part.</p>
-<p>A relay does learn, and no relay design can avoid this: that an inbox received
-a message, when, its padded size (section 5.3), which drop token was used
-(section 4), and the network address of the client that connected. A relay
-SHOULD NOT log network addresses.</p>
+<h3 id="1-1-what-a-relay-can-and-cannot-learn">1.1 What a relay can and cannot learn</h3>
+<p>The relay is not trusted. The protocol is built so that a relay can delay,
+drop or duplicate messages, but cannot read them, change them, or make a
+recipient print something a paired contact did not send.</p>
+<p><strong>A relay cannot decrypt.</strong> The ticket, the sender&#39;s address and name, and the
+pairing secret are inside the sealed part. A relay never holds a key that
+opens it.</p>
+<p><strong>A relay can observe:</strong></p>
+<ul>
+<li>that an inbox exists, when its owner polls, and from which IP address;</li>
+<li>that an inbox received a message, when, and from which IP address;</li>
+<li>the size of each sealed message, in steps of 4096 bytes (section 5.3);</li>
+<li>how many drop tokens an inbox has, when the list changes, and which token
+each message arrived with, so it sees a stable but nameless identity per
+contact (section 4).</li>
+</ul>
+<p><strong>A relay can infer.</strong> When the sender and the recipient both use the same
+relay, the IP address that polls one inbox is the address that drops into
+another, so that relay can work out who writes to whom. The same is true for
+anyone who can watch the relay&#39;s network traffic. Someone who needs to hide
+this uses a different relay from their contacts, or reaches the relay through
+an anonymising network.</p>
+<p>A relay SHOULD NOT keep logs of IP addresses. Clients cannot verify this.</p>
 <h3 id="1-2-encodings">1.2 Encodings</h3>
 <ul>
-<li><strong>base64url</strong> means RFC 4648 section 5, without <code>=</code> padding.</li>
-<li>All JSON is UTF-8. Unknown JSON members MUST be ignored, so that later
-versions can add fields.</li>
-<li>Times are Unix time in whole seconds.</li>
+<li><strong>base64url</strong> means RFC 4648 section 5, without <code>=</code> padding. Encodings MUST
+be canonical: the unused trailing bits are zero. A value that does not
+re-encode to the same text MUST be rejected.</li>
+<li>All JSON is UTF-8 without a byte order mark, and MUST contain only valid
+Unicode (no unpaired surrogates). Senders MUST NOT produce objects with
+duplicate member names. Unknown members MUST be ignored, so that later
+versions can add fields. Receivers MUST reject JSON nested more than 16
+levels deep.</li>
+<li>Times are Unix time in whole seconds, as JSON integers.</li>
+<li>A <strong>host</strong> is a lower-case DNS name with an optional <code>:port</code>, for example
+<code>bonvoyage.kaj.dev</code> or <code>relay.example:8443</code>. IP addresses, user names and
+paths are not allowed in a host.</li>
 </ul>
 <h2 id="2-cryptography">2. Cryptography</h2>
 <p>Bonvoyage uses the NaCl / libsodium primitives, which exist for every common
@@ -204,12 +227,12 @@ language:</p>
 <tbody><tr>
 <td>Signing</td>
 <td>Ed25519</td>
-<td><code>crypto_sign_detached</code></td>
+<td><code>crypto_sign_detached</code>, <code>crypto_sign_verify_detached</code></td>
 </tr>
 <tr>
 <td>Sealing for a recipient</td>
 <td>X25519 + XSalsa20-Poly1305 &quot;sealed box&quot;</td>
-<td><code>crypto_box_seal</code></td>
+<td><code>crypto_box_seal</code>, <code>crypto_box_seal_open</code></td>
 </tr>
 <tr>
 <td>Hashing</td>
@@ -223,64 +246,132 @@ language:</p>
 <li>an <strong>encryption key pair</strong> (X25519), public part 32 bytes.</li>
 </ul>
 <p>The two key pairs are independent. Private keys never leave the printer.</p>
+<p>Signature verification MUST behave as libsodium&#39;s does: public keys of small
+order and signatures with a non-canonical <code>S</code> are rejected. Sealing MUST fail
+for an encryption key of small order (libsodium does this).</p>
 <h2 id="3-addresses-and-contact-cards">3. Addresses and contact cards</h2>
 <h3 id="3-1-inbox-id-and-address">3.1 Inbox ID and address</h3>
 <p>The <strong>inbox ID</strong> is the base64url encoding of the public signing key
 (43 characters).</p>
-<p>An <strong>address</strong> is <code>&lt;inbox ID&gt;@&lt;relay host&gt;</code>, for example:</p>
-<pre><code>m3cX0R1bq0u0m1cX0R1bq0u0m1cX0R1bq0u0m1cX0R1@bonvoyage.kaj.dev
+<p>An <strong>address</strong> is <code>&lt;inbox ID&gt;@&lt;host&gt;</code>, for example:</p>
+<pre><code>0yYB4xGZ1uU5pWqT3n8Lr2VbKcJd7HsMfA6eXoPiQwE@bonvoyage.kaj.dev
 </code></pre>
-<p>The relay&#39;s base URL is <code>https://&lt;relay host&gt;</code>. A relay host MAY include a
-port. Clients MUST use HTTPS, except for <code>localhost</code> during development.</p>
+<p>The relay&#39;s base URL is <code>https://&lt;host&gt;</code>. Clients MUST use HTTPS and verify
+the certificate. Plain HTTP to <code>localhost</code> is allowed only when the person
+running the client has switched on a development mode; it MUST be off by
+default.</p>
+<p>Only the inbox ID identifies a printer. The host says where its inbox is and
+is not authenticated by anything.</p>
 <h3 id="3-2-contact-card">3.2 Contact card</h3>
 <p>To let someone send you tickets, you give them a <strong>contact card</strong>: a URI that
 is easy to put in a QR code.</p>
-<pre><code>bonvoyage://&lt;relay host&gt;/&lt;inbox ID&gt;?k=&lt;encryption key&gt;&amp;t=&lt;drop token&gt;&amp;n=&lt;name&gt;
+<pre><code>bonvoyage://&lt;host&gt;/&lt;inbox ID&gt;?v=1&amp;k=&lt;key&gt;&amp;t=&lt;token&gt;&amp;p=&lt;secret&gt;&amp;e=&lt;time&gt;&amp;n=&lt;name&gt;&amp;s=&lt;signature&gt;
 </code></pre>
 <table>
 <thead>
 <tr>
 <th>Part</th>
 <th>Meaning</th>
+<th>Format</th>
 </tr>
 </thead>
 <tbody><tr>
-<td>relay host, inbox ID</td>
+<td>host, inbox ID</td>
 <td>your address</td>
+<td>section 1.2, 3.1</td>
+</tr>
+<tr>
+<td><code>v</code></td>
+<td>card version</td>
+<td><code>1</code></td>
 </tr>
 <tr>
 <td><code>k</code></td>
-<td>your public encryption key, base64url</td>
+<td>your public encryption key</td>
+<td>base64url, 43 characters</td>
 </tr>
 <tr>
 <td><code>t</code></td>
-<td>a drop token for your inbox (section 4), base64url</td>
+<td>a drop token for your inbox (section 4)</td>
+<td>base64url, 43 characters</td>
+</tr>
+<tr>
+<td><code>p</code></td>
+<td>a pairing secret (section 3.3)</td>
+<td>base64url, 22 characters</td>
+</tr>
+<tr>
+<td><code>e</code></td>
+<td>optional: the card cannot be used to pair after this time</td>
+<td>decimal integer</td>
 </tr>
 <tr>
 <td><code>n</code></td>
-<td>a display name, percent-encoded, optional</td>
+<td>optional: a display name</td>
+<td>percent-encoded UTF-8, at most 40 characters after decoding</td>
+</tr>
+<tr>
+<td><code>s</code></td>
+<td>your signature over the card</td>
+<td>base64url, 86 characters</td>
 </tr>
 </tbody></table>
-<p>A card contains a drop token and is therefore a <strong>secret</strong>: whoever holds it
-can drop messages in your inbox. Hand it over privately. Printing it as a QR
-code on a ticket for the other person to scan is the intended way.</p>
-<p>Each contact SHOULD get their own card with their own drop token, so that one
-contact can be removed without affecting the others.</p>
+<p>The signature is Ed25519, made with the card issuer&#39;s signing key, over the
+UTF-8 bytes of</p>
+<pre><code>&quot;bonvoyage-v1-card\n&quot; || host || &quot;\n&quot; || inbox ID || &quot;\n&quot; || k || &quot;\n&quot; || t || &quot;\n&quot; || p || &quot;\n&quot; || e || &quot;\n&quot; || name
+</code></pre>
+<p>where <code>e</code> is its decimal text or empty when absent, and <code>name</code> is the decoded
+display name or empty when absent.</p>
+<p>Someone who is given a card MUST, before using it:</p>
+<ul>
+<li>check that the URI has exactly this shape: scheme <code>bonvoyage</code>, a valid host,
+a path of exactly one inbox ID, and no user name, fragment or extra path;</li>
+<li>reject a card where any parameter in the table appears more than once, has
+the wrong length or is not canonical base64url, or where <code>v</code> is not <code>1</code>;</li>
+<li>verify <code>s</code> against the inbox ID.</li>
+</ul>
+<p>Parameters not in the table are ignored.</p>
+<p>A card contains a drop token and a pairing secret and is therefore a
+<strong>secret</strong>: whoever holds it can pair with you in the other person&#39;s place.
+Hand it over privately. Printing it as a QR code on a ticket for the other
+person to scan is the intended way. Each contact MUST get their own card with
+their own token and pairing secret.</p>
 <h3 id="3-3-pairing">3.3 Pairing</h3>
 <p>Pairing is one-directional: a card lets its holder send to its issuer. For
 tickets in both directions, both people give each other a card.</p>
-<p>The recipient learns who a sender is as follows. When you issue a card you
-remember which contact its drop token belongs to. The relay tells you which
-token each message arrived with (section 6.4). The first validly signed
-message that arrives with a given token <strong>pins</strong> that sender&#39;s signing key to
-that contact. From then on, messages with that token MUST be signed by the
-pinned key; others MUST be discarded.</p>
+<p>When you issue a card you store a <strong>contact</strong>: your own name for that person,
+the pairing secret, the token ID, and when the card expires for pairing. An
+issuer SHOULD let an unused card expire after about 7 days and MUST refuse to
+pair with it afterwards, whether or not the card carries <code>e</code>.</p>
+<p>Every message carries the pairing secret of the card it was sent with
+(section 5.1). It is inside the sealed part, so the relay never sees it. The
+recipient uses it like this:</p>
+<ol>
+<li>If the message&#39;s signing key is already <strong>pinned</strong> to a contact, the
+message belongs to that contact. The pairing secret in it is not used.</li>
+<li>Otherwise, if the pairing secret equals that of a contact that has no
+pinned key yet and whose card has not expired, that contact is paired: the
+signing key is pinned to it.</li>
+<li>Otherwise the message is from nobody the recipient knows and MUST be
+discarded.</li>
+</ol>
+<p>Pairing secrets MUST be compared in constant time. A signing key MUST be
+pinned to at most one contact, and a contact has at most one pinned key.</p>
+<p>A recipient SHOULD tell its owner when a contact is paired, and SHOULD ask the
+owner to confirm before printing that contact&#39;s first ticket. If a message
+arrives with the pairing secret of a contact that is already pinned to a
+different key, the recipient MUST discard it and SHOULD tell its owner: it
+means the card reached someone else.</p>
+<p>The token the relay reports for a message (section 6.5) is a hint only. It
+MUST NOT be used to decide who a message is from.</p>
 <h2 id="4-drop-tokens">4. Drop tokens</h2>
 <p>A <strong>drop token</strong> is 32 random bytes generated by the inbox owner.</p>
-<p>The owner registers the <strong>token ID</strong>, which is the lowercase hex SHA-256 of
+<p>The owner registers the <strong>token ID</strong>, which is the lower-case hex SHA-256 of
 the 32 token bytes, with the relay. The relay never sees a token until a
 sender uses it, and stores only token IDs.</p>
-<p>Removing a token ID from the inbox revokes that contact&#39;s ability to send.</p>
+<p>Removing a token ID from the inbox stops that card from delivering. An owner
+can also give a contact a fresh card to replace their token, which breaks the
+relay&#39;s ability to link that contact&#39;s old and new messages.</p>
 <h2 id="5-messages">5. Messages</h2>
 <h3 id="5-1-the-message">5.1 The message</h3>
 <p>A message is a JSON object:</p>
@@ -294,18 +385,18 @@ sender uses it, and stores only token IDs.</p>
 </thead>
 <tbody><tr>
 <td><code>v</code></td>
-<td>number</td>
-<td>protocol version, <code>1</code></td>
+<td>integer</td>
+<td>protocol version, exactly <code>1</code></td>
 </tr>
 <tr>
 <td><code>id</code></td>
 <td>string</td>
-<td>16 random bytes, base64url; unique per message</td>
+<td>16 random bytes, base64url (22 characters); unique per message</td>
 </tr>
 <tr>
 <td><code>type</code></td>
 <td>string</td>
-<td><code>&quot;ticket&quot;</code> (others are reserved; unknown types MUST be ignored)</td>
+<td><code>&quot;ticket&quot;</code>; other values are reserved</td>
 </tr>
 <tr>
 <td><code>from</code></td>
@@ -313,29 +404,34 @@ sender uses it, and stores only token IDs.</p>
 <td>sender&#39;s address</td>
 </tr>
 <tr>
-<td><code>from_name</code></td>
-<td>string</td>
-<td>sender&#39;s display name, optional</td>
-</tr>
-<tr>
 <td><code>to</code></td>
 <td>string</td>
 <td>recipient&#39;s address</td>
 </tr>
 <tr>
+<td><code>pair</code></td>
+<td>string</td>
+<td>the pairing secret from the recipient&#39;s card, 22 characters</td>
+</tr>
+<tr>
 <td><code>created</code></td>
-<td>number</td>
-<td>when it was made</td>
+<td>integer</td>
+<td>when it was made; greater than 0 and less than 2^40</td>
 </tr>
 <tr>
 <td><code>expires</code></td>
-<td>number</td>
-<td>optional; do not print after this time</td>
+<td>integer</td>
+<td>optional; do not print after this time; same range</td>
+</tr>
+<tr>
+<td><code>from_name</code></td>
+<td>string</td>
+<td>optional; the sender&#39;s own display name, at most 40 characters</td>
 </tr>
 <tr>
 <td><code>ticket</code></td>
 <td>object</td>
-<td>the ticket (section 7), for type <code>ticket</code></td>
+<td>the ticket (section 7), required for type <code>ticket</code></td>
 </tr>
 </tbody></table>
 <h3 id="5-2-signing">5.2 Signing</h3>
@@ -354,84 +450,175 @@ verify against the decoded bytes of <code>msg</code>, and only then parse them.<
 </code></pre>
 <p>with as many zero bytes as needed to make <code>len(P)</code> a multiple of 4096.</p>
 <p>The <strong>sealed message</strong> is <code>crypto_box_seal(P, recipient public encryption key)</code>.
-Its length is <code>len(P) + 48</code>. A sealed message MUST NOT exceed 65536 bytes,
-which leaves 61436 bytes for <code>S</code>.</p>
+Its length is <code>len(P) + 48</code>, so every sealed message is <code>48 + n * 4096</code> bytes
+long, with <code>n</code> from 1 to 15. The largest is 61488 bytes, which leaves 61436
+bytes for <code>S</code>.</p>
 <h3 id="5-4-receiving">5.4 Receiving</h3>
-<p>For every sealed message collected, a recipient MUST:</p>
+<p>A recipient handles each collected message with the steps below, in this
+order. If any step fails, or if handling the message raises any error at all,
+the message is <strong>discarded</strong>: it MUST NOT be printed, it MUST be deleted from
+the relay, and the recipient MUST carry on with the next message.</p>
 <ol>
-<li>open it with its encryption key pair; on failure discard it;</li>
-<li>read the length, take <code>S</code>, and parse the signed message;</li>
-<li>decode <code>msg</code> to bytes <code>M</code> and parse the message;</li>
-<li>check <code>v</code> is <code>1</code> and <code>to</code> equals its own address;</li>
-<li>take the sender&#39;s public signing key from the inbox ID in <code>from</code> and verify
-<code>sig</code> over <code>&quot;bonvoyage-v1-message\n&quot; || M</code>;</li>
-<li>check the sender against the token the message arrived with (section 3.3);</li>
-<li>discard it if <code>id</code> was seen before, if <code>created</code> is more than 10 minutes in
-the future, or if <code>expires</code> has passed;</li>
-<li>apply its own policy (section 8), then print or queue it;</li>
-<li>delete the message from the relay.</li>
+<li><strong>Open.</strong> The sealed length is <code>48 + n * 4096</code>. Open it with the encryption
+key pair to get <code>P</code>.</li>
+<li><strong>Unpad.</strong> Read the length <code>L</code>; it MUST be at most <code>len(P) - 4</code>, and every
+byte after <code>S</code> MUST be zero.</li>
+<li><strong>Unwrap.</strong> Parse <code>S</code> as JSON. <code>msg</code> and <code>sig</code> MUST be canonical base64url
+strings, <code>sig</code> of 64 bytes. Decode <code>msg</code> to the bytes <code>M</code>.</li>
+<li><strong>Verify.</strong> Parse <code>M</code> as JSON; it MUST be an object, and <code>from</code> MUST be a
+valid address. Take the signing key from the inbox ID in <code>from</code> and verify
+<code>sig</code> over <code>&quot;bonvoyage-v1-message\n&quot; || M</code>.</li>
+<li><strong>Validate.</strong> Every member in the table of 5.1 MUST have exactly the stated
+type and format (<code>v</code> is the number 1, not <code>true</code> or <code>&quot;1&quot;</code>). The inbox ID in
+<code>to</code> MUST equal the recipient&#39;s own; the host in <code>to</code> is not compared.</li>
+<li><strong>Check the time.</strong> Discard if <code>created</code> is more than 600 seconds in the
+future, if <code>created</code> is more than 691200 seconds (8 days) in the past, or
+if <code>expires</code> is present and has passed.</li>
+<li><strong>Check for a repeat.</strong> Discard if this signing key and <code>id</code> were handled
+before. Recipients MUST remember them for at least 692000 seconds, counted
+from when the message was received.</li>
+<li><strong>Find the contact</strong> as described in section 3.3.</li>
+<li><strong>Record.</strong> Store the signing key and <code>id</code> as handled, and the pinned key
+if this message paired a contact, on storage that survives a restart,
+before going on.</li>
+<li><strong>Act.</strong> For type <code>ticket</code>: validate the ticket (section 7), apply the
+recipient&#39;s policy (section 8), then print or queue it. Messages of any
+other type are dropped without printing.</li>
+<li><strong>Delete</strong> the message from the relay.</li>
 </ol>
-<p>A message that fails any check MUST be deleted from the relay and MUST NOT be
-printed. Recipients SHOULD remember seen <code>id</code> values for at least 14 days.</p>
+<p>A recipient that holds a ticket for later (quiet hours, approval) SHOULD check
+<code>expires</code> again at the moment of printing.</p>
 <h2 id="6-relay-http-interface">6. Relay HTTP interface</h2>
 <p>All paths are relative to the relay&#39;s base URL. Bodies and responses are JSON
 unless stated. Errors use the matching HTTP status with
 <code>{&quot;error&quot;: &quot;&lt;short text&gt;&quot;}</code>.</p>
+<p>Statuses used by every endpoint:</p>
+<table>
+<thead>
+<tr>
+<th>Status</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>400</code></td>
+<td>malformed request, including any query string on a <code>/v1</code> path</td>
+</tr>
+<tr>
+<td><code>401</code></td>
+<td>missing or invalid credentials</td>
+</tr>
+<tr>
+<td><code>404</code></td>
+<td>no such path</td>
+</tr>
+<tr>
+<td><code>405</code></td>
+<td>method not allowed on this path</td>
+</tr>
+<tr>
+<td><code>413</code></td>
+<td>body too large</td>
+</tr>
+<tr>
+<td><code>429</code></td>
+<td>too many requests or a quota reached; a <code>Retry-After</code> header gives seconds</td>
+</tr>
+<tr>
+<td><code>503</code></td>
+<td>relay temporarily unavailable; may carry <code>Retry-After</code></td>
+</tr>
+</tbody></table>
+<p>A client that receives <code>429</code> or <code>503</code> MUST wait at least the given time, or 60
+seconds when none is given, before trying that relay again, and SHOULD double
+the wait on repeated failures up to an hour.</p>
+<p>Clients MUST NOT follow HTTP redirects from a relay, MUST NOT read a response
+larger than 4 MiB, and SHOULD NOT send headers that identify the client
+software or its owner.</p>
+<p>A relay MAY limit how many requests an IP address makes in a short period.
+Keeping counters for that purpose for at most an hour is not logging in the
+sense of section 1.1.</p>
 <h3 id="6-1-relay-information">6.1 Relay information</h3>
 <p><code>GET /v1</code> returns the relay&#39;s limits:</p>
-<pre><code class="language-json">{&quot;bonvoyage&quot;: 1, &quot;max_message_bytes&quot;: 65536, &quot;max_messages&quot;: 50,
- &quot;retention_seconds&quot;: 604800, &quot;max_tokens&quot;: 64, &quot;registration&quot;: &quot;open&quot;}
+<pre><code class="language-json">{&quot;bonvoyage&quot;: 1, &quot;max_message_bytes&quot;: 61488, &quot;max_messages&quot;: 50,
+ &quot;max_messages_per_token&quot;: 10, &quot;retention_seconds&quot;: 604800,
+ &quot;max_tokens&quot;: 64, &quot;registration&quot;: &quot;open&quot;}
 </code></pre>
+<p><code>registration</code> is <code>open</code>, <code>invite</code> (section 6.3) or <code>closed</code>.</p>
 <h3 id="6-2-owner-authentication">6.2 Owner authentication</h3>
 <p>Requests marked <strong>owner</strong> are signed with the inbox&#39;s signing key. The client
 sends the header</p>
-<pre><code>Bonvoyage-Auth: t=&lt;time&gt;,sig=&lt;base64url signature&gt;
+<pre><code>Bonvoyage-Auth: t=&lt;time&gt;,sig=&lt;signature&gt;
 </code></pre>
-<p>where the signature is Ed25519 over the UTF-8 bytes of</p>
-<pre><code>&quot;bonvoyage-v1-request\n&quot; || METHOD || &quot;\n&quot; || PATH || &quot;\n&quot; || time || &quot;\n&quot; || hex(SHA-256(body))
+<p>exactly in that form: <code>time</code> in decimal without leading zeros, <code>signature</code> as
+86 characters of base64url. The signature is Ed25519 over the UTF-8 bytes of</p>
+<pre><code>&quot;bonvoyage-v1-request\n&quot; || METHOD || &quot;\n&quot; || host || &quot;\n&quot; || PATH || &quot;\n&quot; || time || &quot;\n&quot; || hex(SHA-256(body))
 </code></pre>
-<p><code>METHOD</code> is upper case, <code>PATH</code> is the request path without query string, and
-<code>body</code> is the exact request body (empty for requests without one). The relay
-MUST reject a request whose time differs from its own by more than 300
-seconds, or whose signature does not verify against the inbox ID in the path
-(<code>401</code>).</p>
+<p><code>METHOD</code> is upper case, <code>host</code> is the relay&#39;s host as in the address, <code>PATH</code>
+is the request path, and <code>body</code> is the exact request body (empty for requests
+without one).</p>
+<p>The relay MUST reject (<code>401</code>) a request whose time differs from its own by
+more than 300 seconds, whose host is not the one it is being addressed as, or
+whose signature does not verify against the inbox ID in the path.</p>
+<p>A relay MUST also refuse (<code>409</code>) a <code>PUT</code> or <code>DELETE</code> of an inbox that carries
+a signature it has already accepted. Because the host is signed, a request
+made to one relay cannot be replayed to another. Ed25519 signatures are
+deterministic, so an owner who sends the same request twice within one second
+gets <code>409</code> for the second; it signs again with a later time.</p>
+<p>A client whose clock is wrong will be refused; it can read the relay&#39;s time
+from the <code>Date</code> header of any response.</p>
 <h3 id="6-3-inbox-management-owner">6.3 Inbox management (owner)</h3>
 <p><code>PUT /v1/inbox/&lt;inbox ID&gt;</code> creates the inbox or replaces its settings.</p>
 <pre><code class="language-json">{&quot;tokens&quot;: [&quot;&lt;token ID&gt;&quot;, &quot;...&quot;]}
 </code></pre>
-<p><code>tokens</code> is the complete list of accepted token IDs. Replacing the list is how
-tokens are added and revoked. Response <code>200</code> with the stored settings.</p>
+<p><code>tokens</code> is the complete list of accepted token IDs, at most <code>max_tokens</code>.
+Replacing the list is how tokens are added and revoked. Response <code>200</code> with
+<code>{&quot;id&quot;: &quot;&lt;inbox ID&gt;&quot;, &quot;tokens&quot;: [...]}</code>, duplicates removed.</p>
 <p><code>DELETE /v1/inbox/&lt;inbox ID&gt;</code> removes the inbox and everything in it (<code>204</code>).</p>
-<p>A relay MAY refuse new inboxes (<code>403</code>), for example when registration is
-closed or it is full. A relay MAY remove an inbox that has not been collected
-from for 180 days.</p>
+<p>Creating an inbox can be refused: <code>403</code> when registration is closed, the
+relay is full, or an invitation is required and missing or wrong; <code>429</code> when
+too many inboxes were created recently. On a relay with <code>registration: &quot;invite&quot;</code>, the client adds the header <code>Bonvoyage-Invite: &lt;code&gt;</code> when creating
+an inbox. Existing inboxes keep working in every mode.</p>
+<p>A relay MAY remove an inbox that was never collected from after 7 days, and
+any inbox that has not been collected from for 180 days.</p>
 <h3 id="6-4-dropping-a-message-sender">6.4 Dropping a message (sender)</h3>
 <p><code>POST /v1/inbox/&lt;inbox ID&gt;/messages</code></p>
 <ul>
 <li>Header <code>Authorization: Bearer &lt;drop token, base64url&gt;</code>.</li>
-<li>Header <code>Content-Type: application/octet-stream</code>.</li>
-<li>Body: the sealed message, raw bytes.</li>
+<li>Body: the sealed message, raw bytes. No particular <code>Content-Type</code> is required.</li>
 </ul>
-<p>The relay accepts it (<code>201</code>, body <code>{&quot;id&quot;: &quot;&lt;relay message id&gt;&quot;}</code>) when the
-inbox exists, the SHA-256 of the decoded token is one of the inbox&#39;s token IDs,
-the body is at most <code>max_message_bytes</code>, and the inbox holds fewer than
-<code>max_messages</code> messages. Otherwise: <code>401</code> when the inbox does not exist or the
-token is not accepted, <code>413</code> if the body is too large, <code>429</code> if the inbox is
-full.</p>
+<p>The relay accepts it (<code>201</code>, body <code>{&quot;id&quot;: &quot;&lt;relay message id&gt;&quot;}</code>) when:</p>
+<ul>
+<li>the inbox exists and the SHA-256 of the decoded token is one of its token
+IDs, otherwise <code>401</code>;</li>
+<li>the body length is <code>48 + n * 4096</code> for <code>n</code> from 1 to 15, otherwise <code>400</code>, or
+<code>413</code> when it is longer than <code>max_message_bytes</code>;</li>
+<li>the inbox holds fewer than <code>max_messages</code> messages, and fewer than
+<code>max_messages_per_token</code> that arrived with this token, otherwise <code>429</code>.</li>
+</ul>
 <p>The relay MUST NOT reveal whether a <code>401</code> was caused by an unknown inbox or by
-an unknown token; both get the same response.</p>
+an unknown token; both get the same response. A relay SHOULD check the
+credentials&#39; shape before reading the body.</p>
 <h3 id="6-5-collecting-owner">6.5 Collecting (owner)</h3>
-<p><code>GET /v1/inbox/&lt;inbox ID&gt;/messages</code> returns up to 20 of the oldest messages:</p>
+<p><code>GET /v1/inbox/&lt;inbox ID&gt;/messages</code> returns up to 20 of the oldest messages
+(<code>404</code> when the inbox does not exist):</p>
 <pre><code class="language-json">{&quot;messages&quot;: [
   {&quot;id&quot;: &quot;&lt;relay message id&gt;&quot;, &quot;received&quot;: 1795000000,
    &quot;token&quot;: &quot;&lt;token ID it arrived with&gt;&quot;, &quot;body&quot;: &quot;&lt;base64url sealed message&gt;&quot;}
 ]}
 </code></pre>
+<p>A relay message id matches <code>^[A-Za-z0-9_-]{1,64}$</code>. A client MUST skip any
+entry whose <code>id</code> does not, and MUST NOT process more than 20 entries from one
+response.</p>
 <p><code>DELETE /v1/inbox/&lt;inbox ID&gt;/messages/&lt;relay message id&gt;</code> removes one message
 (<code>204</code>, also when it no longer exists).</p>
 <p>Collecting does not remove messages; the recipient deletes each one after
 handling it. A message that is never deleted is removed by the relay after
 <code>retention_seconds</code>.</p>
+<p><code>token</code> tells the owner which card a message was dropped with. It comes from
+the relay and is not proof of anything (section 3.3), but it is useful for
+revoking a token that delivers messages which keep being discarded, which a
+recipient SHOULD do.</p>
 <p>Clients SHOULD poll no more often than once every 30 seconds.</p>
 <h2 id="7-tickets">7. Tickets</h2>
 <p>A ticket describes content, not printer commands. Every recipient renders it
@@ -443,6 +630,8 @@ in its own way, for its own paper width.</p>
   {&quot;type&quot;: &quot;qr&quot;, &quot;data&quot;: &quot;https://example.com&quot;}
 ]}
 </code></pre>
+<p><code>blocks</code> is an array of objects. A block that is not an object makes the
+ticket invalid.</p>
 <h3 id="7-1-blocks">7.1 Blocks</h3>
 <table>
 <thead>
@@ -454,8 +643,8 @@ in its own way, for its own paper width.</p>
 </thead>
 <tbody><tr>
 <td><code>text</code></td>
-<td><code>text</code>; optional <code>align</code> (<code>left</code>, <code>center</code>, <code>right</code>), <code>bold</code>, <code>underline</code>, <code>size</code> (<code>small</code>, <code>normal</code>, <code>large</code>, <code>huge</code>)</td>
-<td>A paragraph. Line breaks in <code>text</code> are kept; the recipient wraps long lines.</td>
+<td><code>text</code> (string); optional <code>align</code> (<code>left</code>, <code>center</code>, <code>right</code>), <code>bold</code>, <code>underline</code> (booleans), <code>size</code> (<code>small</code>, <code>normal</code>, <code>large</code>, <code>huge</code>)</td>
+<td>A paragraph. Line feeds in <code>text</code> start a new line; the recipient wraps long lines.</td>
 </tr>
 <tr>
 <td><code>divider</code></td>
@@ -464,37 +653,107 @@ in its own way, for its own paper width.</p>
 </tr>
 <tr>
 <td><code>list</code></td>
-<td><code>items</code> (strings); optional <code>style</code> (<code>bullet</code>, <code>number</code>, <code>check</code>)</td>
+<td><code>items</code> (array of strings); optional <code>style</code> (<code>bullet</code>, <code>number</code>, <code>check</code>)</td>
 <td>A list. <code>check</code> draws a box to tick.</td>
 </tr>
 <tr>
 <td><code>qr</code></td>
-<td><code>data</code>; optional <code>caption</code></td>
+<td><code>data</code> (string); optional <code>caption</code> (string)</td>
 <td>A QR code containing <code>data</code>.</td>
 </tr>
 <tr>
 <td><code>image</code></td>
-<td><code>png</code> (base64url PNG); optional <code>alt</code>, <code>align</code></td>
-<td>A picture, at most 576 pixels wide and 1200 high. Recipients scale it to their paper and convert it to black and white.</td>
+<td><code>png</code> (base64url PNG); optional <code>alt</code> (string), <code>align</code></td>
+<td>A picture. Recipients scale it to their paper and convert it to black and white.</td>
 </tr>
 <tr>
 <td><code>space</code></td>
-<td>optional <code>lines</code> (1 to 5)</td>
+<td>optional <code>lines</code> (integer 1 to 5, default 1)</td>
 <td>Blank lines.</td>
 </tr>
 </tbody></table>
-<p>Rules:</p>
 <ul>
 <li>A recipient MUST support <code>text</code>, <code>divider</code>, <code>list</code> and <code>space</code>. If it cannot
 render a <code>qr</code> or <code>image</code> block it prints the <code>caption</code> or <code>alt</code> text instead,
 or nothing.</li>
-<li>Unknown block types and unknown members MUST be skipped without error.</li>
+<li>Blocks of an unknown type are skipped. They still count towards the number
+of blocks.</li>
 <li>Unknown values for <code>size</code>, <code>align</code> or <code>style</code> are treated as the default.</li>
-<li>A ticket has at most 100 blocks and at most 8000 characters of text in total.</li>
-<li>Text may contain any Unicode. A recipient replaces what its printer cannot
-show.</li>
 </ul>
-<h3 id="7-2-what-a-recipient-must-never-do">7.2 What a recipient must never do</h3>
+<h3 id="7-2-limits">7.2 Limits</h3>
+<p>Senders MUST NOT exceed these limits. A recipient MUST check them before
+rendering and MUST discard the whole ticket if any is exceeded.</p>
+<table>
+<thead>
+<tr>
+<th>Limit</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Blocks in a ticket</td>
+<td>100</td>
+</tr>
+<tr>
+<td>Characters in a ticket: the Unicode code points of every <code>text</code>, list item, <code>caption</code> and <code>alt</code> together</td>
+<td>8000</td>
+</tr>
+<tr>
+<td>Lines in a ticket: for each <code>text</code> block one plus its line feeds, for each <code>list</code> its number of items, for each <code>space</code> its lines, one per <code>divider</code></td>
+<td>300</td>
+</tr>
+<tr>
+<td>Items in one list</td>
+<td>50</td>
+</tr>
+<tr>
+<td><code>qr</code> blocks in a ticket</td>
+<td>4</td>
+</tr>
+<tr>
+<td><code>data</code> of one QR code, in UTF-8 bytes</td>
+<td>512</td>
+</tr>
+<tr>
+<td><code>image</code> blocks in a ticket</td>
+<td>2</td>
+</tr>
+<tr>
+<td>One image</td>
+<td>576 pixels wide, 1200 high</td>
+</tr>
+<tr>
+<td>All images in a ticket together</td>
+<td>1600 pixels high</td>
+</tr>
+</tbody></table>
+<p>These limits bound what a sender may ask for. On top of them, a recipient MUST
+enforce its own maximum printed length per ticket, in its own units; one metre
+is a reasonable ceiling. A ticket that would be longer is cut off with a
+visible mark, or discarded.</p>
+<h3 id="7-3-text">7.3 Text</h3>
+<p>Before text reaches a printer, a recipient MUST:</p>
+<ul>
+<li>remove every code point in the Unicode categories Cc (control) and Cf
+(format), except that a line feed (U+000A) in the <code>text</code> of a <code>text</code> block
+is kept as a line break, and a tab (U+0009) becomes a space;</li>
+<li>replace line feeds everywhere else (list items, <code>caption</code>, <code>alt</code>, names),
+and the separators U+2028 and U+2029 everywhere, by a space.</li>
+</ul>
+<p>After this, the bytes sent to the printer for text MUST NOT contain any byte
+below 0x20 other than the line feeds the recipient&#39;s own renderer emits. Text
+may otherwise contain any Unicode; a recipient replaces what its printer
+cannot show.</p>
+<h3 id="7-4-images">7.4 Images</h3>
+<p>A recipient that renders images MUST, before decoding the pixel data:</p>
+<ul>
+<li>check that the data is a PNG and read the width and height from its header;</li>
+<li>skip the block if either is zero or over the limit;</li>
+<li>refuse to decompress more than the declared size requires.</li>
+</ul>
+<p>It SHOULD ignore ancillary chunks and animation. Senders SHOULD use 1-bit or
+8-bit greyscale. A message leaves room for about 34 kB of PNG data in total.</p>
+<h3 id="7-5-what-a-recipient-must-never-do">7.5 What a recipient must never do</h3>
 <ul>
 <li>It MUST NOT send any part of a ticket to the printer as raw commands.</li>
 <li>It MUST NOT fetch URLs or other remote resources because a ticket mentions
@@ -504,27 +763,44 @@ them. A QR code is drawn, never followed.</li>
 <p>Paper comes out in someone&#39;s home, so the recipient&#39;s rules always win. A
 recipient:</p>
 <ul>
-<li>MUST discard messages from senders it has not paired with;</li>
-<li>SHOULD limit how many tickets each contact can print per day;</li>
+<li>MUST discard messages from senders it has not paired with (section 3.3);</li>
+<li>MUST limit how many tickets each contact can print in a day, with a limit of
+its own choosing; 10 is reasonable;</li>
 <li>SHOULD respect its own quiet hours, holding tickets until they end;</li>
-<li>SHOULD mark a received ticket with the sender&#39;s name and that it arrived
-through Bonvoyage;</li>
+<li>MUST label a received ticket with <strong>its own name for the contact</strong>, and
+SHOULD show that it arrived through Bonvoyage. <code>from_name</code> and the name on
+a card are only suggestions for naming a new contact; they are never printed
+as the sender;</li>
 <li>MAY hold tickets for approval by a person before printing;</li>
 <li>MAY drop tickets silently. There are no delivery receipts in version 1, so a
 sender cannot tell whether a ticket was printed.</li>
 </ul>
 <h2 id="9-security-notes">9. Security notes</h2>
 <ul>
+<li><strong>What the relay can do.</strong> A relay can drop, delay, duplicate and reorder
+messages, lie about which token a message arrived with, and refuse service.
+It cannot read a message, change one, or get a recipient to print something
+a paired contact did not send: pairing depends on a secret the relay never
+sees, and afterwards on the sender&#39;s signature.</li>
 <li><strong>Forwarding.</strong> <code>to</code> is inside the signed bytes, so a recipient cannot
 re-seal someone&#39;s message for a third party and have it accepted.</li>
-<li><strong>Replay.</strong> The relay could deliver a message twice; the <code>id</code> check stops a
-second print.</li>
-<li><strong>Stolen card.</strong> A leaked card lets a stranger drop messages, but the
-pinned-key rule (section 3.3) means they are discarded once the real contact
-has sent a first message. Before that first message, the stranger could be
-pinned instead; issue cards privately and revoke a token if in doubt.</li>
-<li><strong>Relay misbehaviour.</strong> A relay can drop, delay or duplicate messages. It
-cannot read, alter or forge them.</li>
+<li><strong>Replay.</strong> A message can be printed once: the recipient remembers handled
+messages for longer than the maximum age it accepts (section 5.4).</li>
+<li><strong>A card that reaches the wrong person.</strong> Whoever uses a card first is
+paired as that contact. Afterwards the intended person&#39;s messages are
+discarded, which the owner is told about (section 3.3), and the fix is to
+remove the contact and issue a new card. Expiry and owner confirmation limit
+the window. A card issued for one person can also be handed on by them to
+someone else; a card proves possession of the card, not who holds it.</li>
+<li><strong>Shared inbox.</strong> Anyone holding a valid token can fill their own share of
+an inbox (<code>max_messages_per_token</code>) with messages that will be discarded.
+The owner sees which token and can revoke it.</li>
+<li><strong>No forward secrecy.</strong> Whoever records sealed messages and later obtains
+the recipient&#39;s private encryption key can read them all, including who sent
+them. Keep that key safe; a printer that suspects its keys leaked creates a
+new identity and pairs again.</li>
+<li><strong>Signatures are proof.</strong> A recipient can show a signed message to others as
+evidence that the sender wrote it.</li>
 <li><strong>Lost keys.</strong> There is no recovery. A printer that loses its keys creates a
 new identity and pairs again.</li>
 </ul>
