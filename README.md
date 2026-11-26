@@ -155,6 +155,7 @@ The conformance tests run against any relay:
     cd relay
     npm test                                         # in-process
     RELAY_URL=https://relay.example npm test         # a running relay
+    RELAY_URL=https://relay.example RELAY_DELAY_MS=700 npm test   # one behind a rate limit
 
 ## Security
 

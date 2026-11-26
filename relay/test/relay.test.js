@@ -2,6 +2,8 @@
 //
 //   node --test test/                      in-process, against the Node storage
 //   RELAY_URL=http://localhost:8787 node --test test/     against any running relay
+//   RELAY_URL=https://relay.example RELAY_DELAY_MS=700 node --test --test-concurrency=1 test/
+//                                          the same, slowly, for a relay behind a rate limit
 //
 // Tests that need to move the clock or change settings only run in-process.
 import assert from "node:assert/strict";
@@ -19,7 +21,13 @@ if (!REMOTE) {
   relay = createRelay(new NodeStore(":memory:"), { now: () => clock, maxNewInboxesPerHour: 1000 });
 }
 
-const send = (request, target = relay) => (REMOTE ? fetch(request) : target.fetch(request));
+// RELAY_DELAY_MS spaces the requests out, for a relay that sits behind a rate limit.
+const DELAY = Number(process.env.RELAY_DELAY_MS || 0);
+async function send(request, target = relay) {
+  if (!REMOTE) return target.fetch(request);
+  if (DELAY) await new Promise((resolve) => setTimeout(resolve, DELAY));
+  return fetch(request);
+}
 const url = (path) => BASE + path;
 const now = () => (REMOTE ? Math.floor(Date.now() / 1000) : clock);
 
